@@ -28,7 +28,7 @@ An Android application that connects to R50 rowing machines via Bluetooth and ma
    - **Bike**: Advertises as an indoor bike (for Zwift cycling with rowing data converted to bike metrics)
 4. **MQTT (Optional)**: Configure MQTT broker settings if you want to publish data to external systems
 
-### 2. Connect to Zwift
+### 2. Connect to Zwift (In progress)
 
 #### As a Rowing Machine:
 1. Select "Rower" as machine type in the app
