@@ -31,6 +31,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
@@ -53,6 +55,7 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import com.google.gson.Gson
 import org.eclipse.paho.android.service.MqttAndroidClient
@@ -79,6 +82,10 @@ data class BluetoothDeviceInfo(
 )
 
 class MainActivity : ComponentActivity() {
+    companion object {
+        const val APP_VERSION = "v1.2.3"
+    }
+
     private var deviceMac = ""
     private val uuidFFF1 = UUID.fromString("0000fff1-0000-1000-8000-00805f9b34fb")
     private val uuidFFF2 = UUID.fromString("0000fff2-0000-1000-8000-00805f9b34fb")
@@ -162,7 +169,8 @@ class MainActivity : ComponentActivity() {
     private val repeatingPayload = hexStringToBytes("f0a201e87b")
 
     @RequiresApi(Build.VERSION_CODES.S)
-    @RequiresPermission(allOf = [android.Manifest.permission.ACCESS_FINE_LOCATION, android.Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT])
+
+    @RequiresPermission(allOf = [android.Manifest.permission.ACCESS_FINE_LOCATION, android.Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT, android.Manifest.permission.BLUETOOTH_ADVERTISE])
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
@@ -187,7 +195,7 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier.padding(innerPadding),
                             rowingData = currentRowingData.value,
                             ftmsConnectedDevices = if (ftmsEnabled) ftmsServer.getConnectedDevicesCount() else 0,
-                            onBack = { 
+                            onBack = @androidx.annotation.RequiresPermission(allOf = [android.Manifest.permission.BLUETOOTH_ADVERTISE, android.Manifest.permission.BLUETOOTH_CONNECT]) {
                                 showDataScreen = false
                                 disconnectAll()
                             }
@@ -513,6 +521,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
             override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
                 if (characteristic.uuid == uuidFFF1) {
                     val values = characteristic.value
@@ -591,7 +600,7 @@ class MainActivity : ComponentActivity() {
                     val result = gattConnection?.writeCharacteristic(char)
                     Log.d("BLE", "Sending repeating payload: ${repeatingPayload.toHexString()} → result=$result")
                 }
-                handler.postDelayed(this, 2000)
+                handler.postDelayed(this, 1000)
             }
         })
     }
@@ -638,7 +647,9 @@ fun RowingDataScreen(
     ftmsConnectedDevices: Int = 0
 ) {
     Column(
-        modifier = modifier.padding(16.dp)
+        modifier = modifier
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState())
     ) {
         Text(
             text = "R50 Rowing Data",
@@ -783,6 +794,22 @@ fun RowingDataScreen(
         ) {
             Text("Disconnect & Back to Settings")
         }
+        
+        // Version display at the bottom
+        Spacer(modifier = Modifier.height(32.dp))
+        
+        Box(
+            modifier = Modifier.fillMaxWidth(),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = MainActivity.APP_VERSION,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = FontWeight.Light,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+        }
     }
 }
 
@@ -851,7 +878,9 @@ fun ConfigurationScreen(
     var showDeviceDialog by remember { mutableStateOf(false) }
 
     Column(
-        modifier = modifier.padding(16.dp)
+        modifier = modifier
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState())
     ) {
         Text(
             text = "R50 Connector Configuration",
@@ -1130,6 +1159,22 @@ fun ConfigurationScreen(
                 modifier = Modifier.padding(8.dp)
             )
         }
+        
+        // Version display at the bottom
+        Spacer(modifier = Modifier.height(32.dp))
+        
+        Box(
+            modifier = Modifier.fillMaxWidth(),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = MainActivity.APP_VERSION,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = FontWeight.Light,
+                modifier = Modifier.padding(bottom = 16.dp)
+            )
+        }
     }
 
     // Device selection dialog
@@ -1270,7 +1315,7 @@ fun RowingDataScreenPreview() {
 fun ConfigurationScreenPreview() {
     R50ConnectorTheme {
         ConfigurationScreen(
-            onConnect = { _, _, _, _, _, _, _ -> },
+            onConnect = { _, _, _, _, _, _, _, _ -> },
             onDisconnect = { }
         )
     }
