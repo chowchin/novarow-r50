@@ -898,6 +898,8 @@ fun RowingDataScreen(
     mqttStatus: String = "Disconnected",
     bluetoothStatus: String = "Disconnected"
 ) {
+    var showDisconnectDialog by remember { mutableStateOf(false) }
+    
     Column(
         modifier = modifier
             .padding(16.dp)
@@ -1077,7 +1079,7 @@ fun RowingDataScreen(
         Spacer(modifier = Modifier.height(32.dp))
 
         Button(
-            onClick = onBack,
+            onClick = { showDisconnectDialog = true },
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("Disconnect & Back to Settings")
@@ -1098,6 +1100,32 @@ fun RowingDataScreen(
                 modifier = Modifier.padding(bottom = 8.dp)
             )
         }
+    }
+    
+    // Confirmation dialog for disconnect
+    if (showDisconnectDialog) {
+        AlertDialog(
+            onDismissRequest = { showDisconnectDialog = false },
+            title = { Text("Confirm Disconnect") },
+            text = { Text("Are you sure you want to disconnect from the rowing machine and return to settings?") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showDisconnectDialog = false
+                        onBack()
+                    }
+                ) {
+                    Text("Disconnect")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showDisconnectDialog = false }
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }
 
@@ -1167,6 +1195,7 @@ fun ConfigurationScreen(
     var showSavedMessage by remember { mutableStateOf(false) }
     var showDeviceDialog by remember { mutableStateOf(false) }
     var showAutoSaveIndicator by remember { mutableStateOf(false) }
+    var showDisconnectDialog by remember { mutableStateOf(false) }
 
     // Helper function to trigger auto-save with visual feedback
     fun triggerAutoSave() {
@@ -1490,10 +1519,7 @@ fun ConfigurationScreen(
             Spacer(modifier = Modifier.height(16.dp))
             
             Button(
-                onClick = {
-                    isConnected = false
-                    onDisconnect()
-                },
+                onClick = { showDisconnectDialog = true },
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text("Disconnect")
@@ -1551,6 +1577,33 @@ fun ConfigurationScreen(
             },
             onDismiss = { showDeviceDialog = false },
             onRescan = onScanDevices
+        )
+    }
+    
+    // Confirmation dialog for disconnect
+    if (showDisconnectDialog) {
+        AlertDialog(
+            onDismissRequest = { showDisconnectDialog = false },
+            title = { Text("Confirm Disconnect") },
+            text = { Text("Are you sure you want to disconnect from the rowing machine?") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showDisconnectDialog = false
+                        isConnected = false
+                        onDisconnect()
+                    }
+                ) {
+                    Text("Disconnect")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showDisconnectDialog = false }
+                ) {
+                    Text("Cancel")
+                }
+            }
         )
     }
 }
