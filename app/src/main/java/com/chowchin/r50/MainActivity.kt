@@ -61,6 +61,9 @@ import com.google.gson.Gson
 import org.eclipse.paho.android.service.MqttAndroidClient
 import org.eclipse.paho.client.mqttv3.*
 import java.util.*
+import com.chowchin.r50.database.*
+import kotlinx.coroutines.*
+import java.util.concurrent.Executors
 
 data class RowingData(
     val hex: String,
@@ -83,7 +86,7 @@ data class BluetoothDeviceInfo(
 
 class MainActivity : ComponentActivity() {
     companion object {
-        const val APP_VERSION = "v1.2.5"
+        const val APP_VERSION = "v1.2.6"
     }
 
     private var deviceMac = ""
@@ -129,6 +132,13 @@ class MainActivity : ComponentActivity() {
     
     // Bluetooth connection status
     private var bluetoothConnectionStatus = mutableStateOf("Disconnected")
+
+    // Database components
+    private lateinit var database: RowingDatabase
+    lateinit var repository: RowingRepository
+    private var currentSessionId: Long? = null
+    private var dataRecordingJob: Job? = null
+    val databaseScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     // Bluetooth scanning
     private var bluetoothAdapter: BluetoothAdapter? = null
@@ -188,6 +198,10 @@ class MainActivity : ComponentActivity() {
         sharedPreferences = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val savedSettings = loadSettings()
         
+        // Initialize database
+        database = RowingDatabase.getDatabase(this)
+        repository = RowingRepository(database.rowingSessionDao(), database.rowingDataPointDao())
+        
         // Initialize MQTT status
         mqttConnectionStatus.value = "Disconnected"
         
@@ -200,22 +214,31 @@ class MainActivity : ComponentActivity() {
         setContent {
             R50ConnectorTheme {
                 var showDataScreen by remember { mutableStateOf(false) }
+                var showRecordsScreen by remember { mutableStateOf(false) }
                 
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    if (showDataScreen) {
-                        RowingDataScreen(
-                            modifier = Modifier.padding(innerPadding),
-                            rowingData = currentRowingData.value,
-                            ftmsConnectedDevices = if (ftmsEnabled) ftmsServer.getConnectedDevicesCount() else 0,
-                            mqttEnabled = mqttEnabled,
-                            mqttStatus = mqttConnectionStatus.value,
-                            bluetoothStatus = bluetoothConnectionStatus.value,
-                            onBack = @androidx.annotation.RequiresPermission(allOf = [android.Manifest.permission.BLUETOOTH_ADVERTISE, android.Manifest.permission.BLUETOOTH_CONNECT]) {
-                                showDataScreen = false
-                                disconnectAll()
-                            }
-                        )
-                    } else {
+                    when {
+                        showRecordsScreen -> {
+                            RecordsScreen(
+                                modifier = Modifier.padding(innerPadding),
+                                onBack = { showRecordsScreen = false }
+                            )
+                        }
+                        showDataScreen -> {
+                            RowingDataScreen(
+                                modifier = Modifier.padding(innerPadding),
+                                rowingData = currentRowingData.value,
+                                ftmsConnectedDevices = if (ftmsEnabled) ftmsServer.getConnectedDevicesCount() else 0,
+                                mqttEnabled = mqttEnabled,
+                                mqttStatus = mqttConnectionStatus.value,
+                                bluetoothStatus = bluetoothConnectionStatus.value,
+                                onBack = @androidx.annotation.RequiresPermission(allOf = [android.Manifest.permission.BLUETOOTH_ADVERTISE, android.Manifest.permission.BLUETOOTH_CONNECT]) {
+                                    showDataScreen = false
+                                    disconnectAll()
+                                }
+                            )
+                        }
+                        else -> {
                         ConfigurationScreen(
                             modifier = Modifier.padding(innerPadding),
                             initialDeviceMac = savedSettings[KEY_DEVICE_MAC]!!,
@@ -247,11 +270,10 @@ class MainActivity : ComponentActivity() {
                                     startFTMSServer()
                                 }
                                 connectToDevice()
+                                startDatabaseRecording()
                                 showDataScreen = true
                             },
-                            onDisconnect = {
-                                disconnectAll()
-                            },
+                            onViewRecords = { showRecordsScreen = true },
                             onSettingsChanged = { mac, broker, username, password, mqttEn, topic, ftmsEn, machType ->
                                 saveSettings(mac, broker, username, password, mqttEn, topic, ftmsEn, machType)
                             },
@@ -266,11 +288,15 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+    }
 
     @RequiresPermission(allOf = [Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_ADVERTISE])
     private fun disconnectAll() {
         // Stop repeating payloads
         handler.removeCallbacksAndMessages(null)
+        
+        // Stop database recording
+        stopDatabaseRecording()
         
         // Stop FTMS Server
         if (ftmsEnabled) {
@@ -504,6 +530,74 @@ class MainActivity : ComponentActivity() {
     private fun stopFTMSServer() {
         ftmsServer.stopServer()
         Log.i("FTMS", "FTMS Server stopped")
+    }
+
+    // Database recording functions
+    private fun startDatabaseRecording() {
+        databaseScope.launch {
+            try {
+                // Create new session
+                currentSessionId = repository.createNewSession()
+                Log.i("Database", "Started new session with ID: $currentSessionId")
+                
+                // Start periodic recording job
+                startPeriodicDataRecording()
+            } catch (e: Exception) {
+                Log.e("Database", "Error starting database recording", e)
+            }
+        }
+    }
+    
+    private fun stopDatabaseRecording() {
+        // Cancel the periodic recording job
+        dataRecordingJob?.cancel()
+        dataRecordingJob = null
+        
+        // Complete the current session
+        currentSessionId?.let { sessionId ->
+            databaseScope.launch {
+                try {
+                    repository.completeSession(sessionId)
+                    Log.i("Database", "Completed session: $sessionId")
+                    currentSessionId = null
+                } catch (e: Exception) {
+                    Log.e("Database", "Error completing session", e)
+                }
+            }
+        }
+    }
+    
+    private fun startPeriodicDataRecording() {
+        dataRecordingJob = databaseScope.launch {
+            while (isActive && currentSessionId != null) {
+                try {
+                    currentRowingData.value?.let { rowingData ->
+                        currentSessionId?.let { sessionId ->
+                            val dataPoint = RowingDataPoint(
+                                sessionId = sessionId,
+                                timestamp = java.util.Date(),
+                                rawHex = rowingData.hex,
+                                elapsedSecond = rowingData.elapsedSecond,
+                                strokeCount = rowingData.strokeCount,
+                                strokePerMinute = rowingData.strokePerMinute,
+                                distance = rowingData.distance,
+                                calories = rowingData.calories,
+                                heartbeat = rowingData.heartbeat,
+                                power = rowingData.power,
+                                gear = rowingData.gear
+                            )
+                            repository.addDataPoint(sessionId, dataPoint)
+                            Log.d("Database", "Recorded data point for session: $sessionId")
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e("Database", "Error recording data point", e)
+                }
+                
+                // Wait 5 seconds before next recording
+                delay(5000)
+            }
+        }
     }
 
     @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
@@ -942,7 +1036,8 @@ fun ConfigurationScreen(
     initialFtmsEnabled: Boolean = false,
     initialMachineType: FTMSServer.MachineType = FTMSServer.MachineType.ROWER,
     onConnect: (String, String, String, String, Boolean, String, Boolean, FTMSServer.MachineType) -> Unit,
-    onDisconnect: () -> Unit,
+    onViewRecords: () -> Unit = {},
+    onDisconnect: () -> Unit = {},
     onSettingsChanged: (String, String, String, String, Boolean, String, Boolean, FTMSServer.MachineType) -> Unit = { _, _, _, _, _, _, _, _ -> },
     onScanDevices: () -> Unit = {},
     discoveredDevices: List<BluetoothDeviceInfo> = emptyList(),
@@ -1005,7 +1100,8 @@ fun ConfigurationScreen(
                 label = { Text("Device MAC Address") },
                 placeholder = { Text("") },
                 modifier = Modifier.weight(1f),
-                enabled = !isConnected
+                enabled = !isConnected,
+                singleLine = true
             )
             
             OutlinedButton(
@@ -1173,7 +1269,8 @@ fun ConfigurationScreen(
             label = { Text("MQTT Broker URI") },
             placeholder = { Text("tcp://mqtt.example.com:1883") },
             modifier = Modifier.fillMaxWidth(),
-            enabled = !isConnected && mqttEnabled
+            enabled = !isConnected && mqttEnabled,
+            singleLine = true
         )
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -1187,7 +1284,8 @@ fun ConfigurationScreen(
             label = { Text("MQTT Username") },
             placeholder = { Text("username") },
             modifier = Modifier.fillMaxWidth(),
-            enabled = !isConnected && mqttEnabled
+            enabled = !isConnected && mqttEnabled,
+            singleLine = true
         )
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -1201,7 +1299,8 @@ fun ConfigurationScreen(
             label = { Text("MQTT Password") },
             placeholder = { Text("password") },
             modifier = Modifier.fillMaxWidth(),
-            enabled = !isConnected && mqttEnabled
+            enabled = !isConnected && mqttEnabled,
+            singleLine = true
         )
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -1215,7 +1314,8 @@ fun ConfigurationScreen(
             label = { Text("MQTT Topic") },
             placeholder = { Text("r50/rowing_data") },
             modifier = Modifier.fillMaxWidth(),
-            enabled = !isConnected && mqttEnabled
+            enabled = !isConnected && mqttEnabled,
+            singleLine = true
         )
 
         Spacer(modifier = Modifier.height(32.dp))
@@ -1242,6 +1342,15 @@ fun ConfigurationScreen(
             enabled = !isConnected
         ) {
             Text(if (isConnected) "Connected" else "Connect")
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        OutlinedButton(
+            onClick = onViewRecords,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("View Records")
         }
 
         // Auto-hide the saved message after 3 seconds
@@ -1459,6 +1568,314 @@ fun ConfigurationScreenPreview() {
             onConnect = { _, _, _, _, _, _, _, _ -> },
             onDisconnect = { },
             onSettingsChanged = { _, _, _, _, _, _, _, _ -> }
+        )
+    }
+}
+
+@Composable
+fun RecordsScreen(
+    modifier: Modifier = Modifier,
+    onBack: () -> Unit
+) {
+    var sessions by remember { mutableStateOf<List<RowingSession>>(emptyList()) }
+    var selectedSession by remember { mutableStateOf<RowingSession?>(null) }
+    var dataPoints by remember { mutableStateOf<List<RowingDataPoint>>(emptyList()) }
+    var showDeleteDialog by remember { mutableStateOf(false) }
+    var sessionToDelete by remember { mutableStateOf<RowingSession?>(null) }
+
+    // Get the MainActivity instance to access repository
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val activity = context as MainActivity
+    
+    // Load sessions when screen is displayed
+    LaunchedEffect(Unit) {
+        activity.repository.getAllSessions().collect {
+            sessions = it
+        }
+    }
+    
+    // Load data points when session is selected
+    LaunchedEffect(selectedSession) {
+        selectedSession?.let { session ->
+            activity.repository.getDataPointsBySession(session.id).collect {
+                dataPoints = it
+            }
+        }
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(16.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Rowing Records",
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold
+            )
+            Button(onClick = onBack) {
+                Text("Back")
+            }
+        }
+        
+        Spacer(modifier = Modifier.height(16.dp))
+        
+        if (selectedSession == null) {
+            // Show sessions list
+            Text(
+                text = "Sessions",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold
+            )
+            
+            Spacer(modifier = Modifier.height(8.dp))
+            
+            if (sessions.isEmpty()) {
+                Text(
+                    text = "No rowing sessions recorded yet",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                LazyColumn {
+                    items(sessions) { session ->
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp)
+                                .clickable { selectedSession = session }
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(16.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = "Session ${session.id}",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = if (session.isCompleted) "✓" else "In Progress",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = if (session.isCompleted) 
+                                            MaterialTheme.colorScheme.primary 
+                                        else MaterialTheme.colorScheme.error
+                                    )
+                                }
+                                
+                                Text(
+                                    text = "Started: ${java.text.SimpleDateFormat("MMM dd, yyyy HH:mm", java.util.Locale.getDefault()).format(session.startTime)}",
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                
+                                session.endTime?.let { endTime ->
+                                    Text(
+                                        text = "Ended: ${java.text.SimpleDateFormat("MMM dd, yyyy HH:mm", java.util.Locale.getDefault()).format(endTime)}",
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                    
+                                    val duration = endTime.time - session.startTime.time
+                                    val totalSeconds = (duration / 1000).toInt()
+                                    val durationText = if (totalSeconds < 60) {
+                                        "${totalSeconds}s"
+                                    } else {
+                                        val minutes = totalSeconds / 60
+                                        val seconds = totalSeconds % 60
+                                        if (seconds > 0) "${minutes}m ${seconds}s" else "${minutes}m"
+                                    }
+                                    Text(
+                                        text = "Duration: $durationText",
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                }
+                                
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = "Distance: ${session.totalDistance}m",
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                    Text(
+                                        text = "Strokes: ${session.totalStrokes}",
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                    Text(
+                                        text = "Calories: ${session.totalCalories}",
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                                
+                                Spacer(modifier = Modifier.height(8.dp))
+                                
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.End
+                                ) {
+                                    OutlinedButton(
+                                        onClick = {
+                                            sessionToDelete = session
+                                            showDeleteDialog = true
+                                        },
+                                        colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
+                                            contentColor = MaterialTheme.colorScheme.error
+                                        )
+                                    ) {
+                                        Text("Delete")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // Show session details
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Session ${selectedSession?.id} Details",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold
+                )
+                Row {
+                    OutlinedButton(
+                        onClick = {
+                            sessionToDelete = selectedSession
+                            showDeleteDialog = true
+                        },
+                        colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        )
+                    ) {
+                        Text("Delete")
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(onClick = { selectedSession = null }) {
+                        Text("Back")
+                    }
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(16.dp))
+            
+            if (dataPoints.isEmpty()) {
+                Text(
+                    text = "No data points recorded for this session",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                LazyColumn {
+                    items(dataPoints) { dataPoint ->
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 2.dp)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp)
+                            ) {
+                                Text(
+                                    text = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(dataPoint.timestamp),
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    dataPoint.distance?.let {
+                                        Text(
+                                            text = "Dist: ${it}m",
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                    dataPoint.strokePerMinute?.let {
+                                        Text(
+                                            text = "SPM: $it",
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                    dataPoint.power?.let {
+                                        Text(
+                                            text = "Power: ${it}W",
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                    dataPoint.heartbeat?.let {
+                                        Text(
+                                            text = "HR: $it",
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Delete confirmation dialog
+    if (showDeleteDialog && sessionToDelete != null) {
+        AlertDialog(
+            onDismissRequest = { 
+                showDeleteDialog = false
+                sessionToDelete = null
+            },
+            title = {
+                Text("Delete Session")
+            },
+            text = {
+                Text("Are you sure you want to delete Session ${sessionToDelete?.id}? This action cannot be undone.")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        sessionToDelete?.let { session ->
+                            activity.databaseScope.launch {
+                                activity.repository.deleteSession(session.id)
+                                // If we're deleting the currently selected session, go back to list
+                                if (selectedSession?.id == session.id) {
+                                    selectedSession = null
+                                }
+                            }
+                        }
+                        showDeleteDialog = false
+                        sessionToDelete = null
+                    }
+                ) {
+                    Text(
+                        "Delete",
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showDeleteDialog = false
+                        sessionToDelete = null
+                    }
+                ) {
+                    Text("Cancel")
+                }
+            }
         )
     }
 }
