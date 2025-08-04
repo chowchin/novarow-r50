@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.annotation.RequiresApi
@@ -86,7 +87,7 @@ data class BluetoothDeviceInfo(
 
 class MainActivity : ComponentActivity() {
     companion object {
-        const val APP_VERSION = "v1.2.6"
+        const val APP_VERSION = "v1.2.7"
     }
 
     private var deviceMac = ""
@@ -118,6 +119,12 @@ class MainActivity : ComponentActivity() {
     private var mqttEnabled = false
     private val mqttClientId = "R50Connector_${System.currentTimeMillis()}"
     private var mqttTopic = "r50/rowing_data"
+    
+    // MQTT Auto-reconnection
+    private var mqttReconnectAttempts = 0
+    private val maxMqttReconnectAttempts = 10
+    private var mqttReconnectJob: Job? = null
+    private val mqttReconnectDelays = listOf(1000L, 2000L, 5000L, 10000L, 30000L) // Progressive delays in milliseconds
     
     // FTMS Configuration
     private var ftmsEnabled = false
@@ -216,6 +223,15 @@ class MainActivity : ComponentActivity() {
                 var showDataScreen by remember { mutableStateOf(false) }
                 var showRecordsScreen by remember { mutableStateOf(false) }
                 
+                // Manage wake lock based on showDataScreen state
+                LaunchedEffect(showDataScreen) {
+                    if (showDataScreen) {
+                        acquireWakeLock()
+                    } else {
+                        releaseWakeLock()
+                    }
+                }
+                
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     when {
                         showRecordsScreen -> {
@@ -228,7 +244,7 @@ class MainActivity : ComponentActivity() {
                             RowingDataScreen(
                                 modifier = Modifier.padding(innerPadding),
                                 rowingData = currentRowingData.value,
-                                ftmsConnectedDevices = if (ftmsEnabled) ftmsServer.getConnectedDevicesCount() else 0,
+                                ftmsConnectedDevices = 0, // FTMS temporarily disabled
                                 mqttEnabled = mqttEnabled,
                                 mqttStatus = mqttConnectionStatus.value,
                                 bluetoothStatus = bluetoothConnectionStatus.value,
@@ -247,8 +263,8 @@ class MainActivity : ComponentActivity() {
                             initialMqttPassword = savedSettings[KEY_MQTT_PASSWORD]!!,
                             initialMqttEnabled = savedSettings[KEY_MQTT_ENABLED]?.toBoolean() ?: true,
                             initialMqttTopic = savedSettings[KEY_MQTT_TOPIC] ?: ("r50/rowing_data"),
-                            initialFtmsEnabled = savedSettings[KEY_FTMS_ENABLED]?.toBoolean() ?: true,
-                            initialMachineType = FTMSServer.MachineType.valueOf(savedSettings[KEY_MACHINE_TYPE] ?: FTMSServer.MachineType.ROWER.name),
+                            initialFtmsEnabled = false, // FTMS temporarily disabled
+                            initialMachineType = FTMSServer.MachineType.ROWER, // Default value
                             onConnect = { mac, broker, username, password, mqttEn, topic, ftmsEn, machType ->
                                 deviceMac = mac
                                 mqttServerUri = broker
@@ -256,9 +272,9 @@ class MainActivity : ComponentActivity() {
                                 mqttPassword = password
                                 mqttEnabled = mqttEn
                                 mqttTopic = topic
-                                ftmsEnabled = ftmsEn
+                                ftmsEnabled = false // FTMS temporarily disabled
                                 machineType = machType
-                                saveSettings(mac, broker, username, password, mqttEn, topic, ftmsEn, machType)
+                                saveSettings(mac, broker, username, password, mqttEn, topic, false, machType)
                                 checkPermissions()
                                 if (mqttEnabled) {
                                     mqttConnectionStatus.value = "Connecting..."
@@ -266,9 +282,10 @@ class MainActivity : ComponentActivity() {
                                 } else {
                                     mqttConnectionStatus.value = "Disabled"
                                 }
-                                if (ftmsEnabled) {
-                                    startFTMSServer()
-                                }
+                                // FTMS temporarily disabled
+                                // if (ftmsEnabled) {
+                                //     startFTMSServer()
+                                // }
                                 connectToDevice()
                                 startDatabaseRecording()
                                 showDataScreen = true
@@ -298,10 +315,10 @@ class MainActivity : ComponentActivity() {
         // Stop database recording
         stopDatabaseRecording()
         
-        // Stop FTMS Server
-        if (ftmsEnabled) {
-            stopFTMSServer()
-        }
+        // Stop FTMS Server - temporarily disabled
+        // if (ftmsEnabled) {
+        //     stopFTMSServer()
+        // }
         
         // Disconnect Bluetooth
         try {
@@ -317,6 +334,7 @@ class MainActivity : ComponentActivity() {
         }
         
         // Disconnect MQTT
+        stopMqttReconnection() // Stop any ongoing reconnection attempts
         try {
             if (mqttEnabled && ::mqttClient.isInitialized && mqttClient.isConnected) {
                 mqttClient.disconnect()
@@ -430,18 +448,42 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun acquireWakeLock() {
+        try {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            Log.i("WakeLock", "Screen will stay on during rowing session")
+        } catch (e: Exception) {
+            Log.e("WakeLock", "Failed to keep screen on", e)
+        }
+    }
+
+    private fun releaseWakeLock() {
+        try {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            Log.i("WakeLock", "Screen can sleep normally")
+        } catch (e: Exception) {
+            Log.e("WakeLock", "Failed to clear screen flags", e)
+        }
+    }
+
     private fun initializeMqtt() {
         mqttClient = MqttAsyncClient(mqttServerUri, mqttClientId, null)
         
         mqttClient.setCallback(object : MqttCallbackExtended {
             override fun connectComplete(reconnect: Boolean, serverURI: String?) {
-                Log.i("MQTT", "Connected to MQTT broker: $serverURI")
+                Log.i("MQTT", "Connected to MQTT broker: $serverURI (reconnect: $reconnect)")
                 mqttConnectionStatus.value = "Connected"
+                // Reset reconnection attempts on successful connection
+                mqttReconnectAttempts = 0
+                stopMqttReconnection()
             }
 
             override fun connectionLost(cause: Throwable?) {
                 Log.w("MQTT", "MQTT connection lost", cause)
-                mqttConnectionStatus.value = "Connection Lost"
+                mqttConnectionStatus.value = "Reconnecting..."
+                if (mqttEnabled) {
+                    startMqttReconnection()
+                }
             }
 
             override fun messageArrived(topic: String?, message: MqttMessage?) {
@@ -475,12 +517,18 @@ class MainActivity : ComponentActivity() {
 
                 override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
                     Log.e("MQTT", "Failed to connect to MQTT broker", exception)
-                    mqttConnectionStatus.value = "Failed to Connect"
+                    mqttConnectionStatus.value = "Reconnecting..."
+                    if (mqttEnabled) {
+                        startMqttReconnection()
+                    }
                 }
             })
         } catch (e: MqttException) {
             Log.e("MQTT", "MQTT connection error", e)
-            mqttConnectionStatus.value = "Connection Error"
+            mqttConnectionStatus.value = "Reconnecting..."
+            if (mqttEnabled) {
+                startMqttReconnection()
+            }
         }
     }
 
@@ -510,6 +558,61 @@ class MainActivity : ComponentActivity() {
         } catch (e: MqttException) {
             Log.e("MQTT", "Error publishing MQTT message", e)
         }
+    }
+
+    private fun startMqttReconnection() {
+        // Cancel any existing reconnection job
+        stopMqttReconnection()
+        
+        if (!mqttEnabled || mqttReconnectAttempts >= maxMqttReconnectAttempts) {
+            if (mqttReconnectAttempts >= maxMqttReconnectAttempts) {
+                Log.w("MQTT", "Max reconnection attempts reached, giving up")
+                mqttConnectionStatus.value = "Failed to Connect"
+            }
+            return
+        }
+        
+        mqttReconnectJob = databaseScope.launch {
+            try {
+                // Calculate delay using progressive backoff
+                val delayIndex = minOf(mqttReconnectAttempts, mqttReconnectDelays.size - 1)
+                val delay = mqttReconnectDelays[delayIndex]
+                
+                Log.i("MQTT", "Attempting MQTT reconnection in ${delay}ms (attempt ${mqttReconnectAttempts + 1}/$maxMqttReconnectAttempts)")
+                delay(delay)
+                
+                if (mqttEnabled && isActive) {
+                    mqttReconnectAttempts++
+                    Log.i("MQTT", "Reconnection attempt $mqttReconnectAttempts/$maxMqttReconnectAttempts")
+                    
+                    try {
+                        // Close existing client if it exists
+                        if (::mqttClient.isInitialized) {
+                            try {
+                                mqttClient.close()
+                            } catch (e: Exception) {
+                                Log.d("MQTT", "Error closing old MQTT client: ${e.message}")
+                            }
+                        }
+                        
+                        // Create new client and attempt connection
+                        initializeMqtt()
+                    } catch (e: Exception) {
+                        Log.e("MQTT", "Error during MQTT reconnection attempt", e)
+                        if (mqttEnabled) {
+                            startMqttReconnection() // Try again
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("MQTT", "Error in MQTT reconnection job", e)
+            }
+        }
+    }
+    
+    private fun stopMqttReconnection() {
+        mqttReconnectJob?.cancel()
+        mqttReconnectJob = null
     }
 
     @RequiresPermission(allOf = [Manifest.permission.BLUETOOTH_ADVERTISE, Manifest.permission.BLUETOOTH_CONNECT])
@@ -697,10 +800,10 @@ class MainActivity : ComponentActivity() {
                     // Publish to MQTT
                     publishToMqtt(jsonMessage)
                     
-                    // Send to FTMS if enabled
-                    if (ftmsEnabled) {
-                        ftmsServer.updateRowingData(rowingData)
-                    }
+                    // Send to FTMS if enabled - temporarily disabled
+                    // if (ftmsEnabled) {
+                    //     ftmsServer.updateRowingData(rowingData)
+                    // }
                 }
             }
 
@@ -756,15 +859,21 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         
+        // Clear screen flags
+        releaseWakeLock()
+        
+        // Stop MQTT reconnection if running
+        stopMqttReconnection()
+        
         // Stop Bluetooth scanning
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED) {
             stopBluetoothScan()
         }
         
-        // Stop FTMS Server
-        if (ftmsEnabled && ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADVERTISE) == PackageManager.PERMISSION_GRANTED) {
-            stopFTMSServer()
-        }
+        // Stop FTMS Server - temporarily disabled
+        // if (ftmsEnabled && ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADVERTISE) == PackageManager.PERMISSION_GRANTED) {
+        //     stopFTMSServer()
+        // }
         
         try {
             if (mqttEnabled && ::mqttClient.isInitialized && mqttClient.isConnected) {
@@ -931,6 +1040,8 @@ fun RowingDataScreen(
                 modifier = Modifier.padding(top = 4.dp)
             )
             
+            // FTMS temporarily disabled
+            /*
             if (ftmsConnectedDevices > 0) {
                 Text(
                     text = "FTMS: $ftmsConnectedDevices Zwift device(s) connected",
@@ -939,6 +1050,7 @@ fun RowingDataScreen(
                     modifier = Modifier.padding(top = 4.dp)
                 )
             }
+            */
         } else {
             Box(
                 modifier = Modifier.fillMaxWidth(),
@@ -1125,6 +1237,8 @@ fun ConfigurationScreen(
 
         Spacer(modifier = Modifier.height(24.dp))
 
+        // FTMS Configuration temporarily hidden - not functioning yet
+        /*
         Text(
             text = "FTMS Configuration (for Zwift)",
             style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
@@ -1231,6 +1345,7 @@ fun ConfigurationScreen(
         }
 
         Spacer(modifier = Modifier.height(24.dp))
+        */
 
         Text(
             text = "MQTT Configuration",
@@ -1390,14 +1505,15 @@ fun ConfigurationScreen(
             val statusMessage = buildString {
                 append("✓ Connected to device")
                 if (mqttEnabled) append(" and MQTT broker")
-                if (ftmsEnabled) {
-                    val machineTypeName = when (machineType) {
-                        FTMSServer.MachineType.ROWER -> "rower"
-                        FTMSServer.MachineType.BIKE -> "bike"
-                    }
-                    append(" and advertising as $machineTypeName to Zwift")
-                }
-                if (!mqttEnabled && !ftmsEnabled) append(" only")
+                // FTMS temporarily disabled
+                // if (ftmsEnabled) {
+                //     val machineTypeName = when (machineType) {
+                //         FTMSServer.MachineType.ROWER -> "rower"
+                //         FTMSServer.MachineType.BIKE -> "bike"
+                //     }
+                //     append(" and advertising as $machineTypeName to Zwift")
+                // }
+                if (!mqttEnabled) append(" only")
             }
             Text(
                 text = statusMessage,
