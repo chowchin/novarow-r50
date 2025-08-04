@@ -21,7 +21,7 @@ An Android application that connects to R50 rowing machines via Bluetooth and ma
 
 ### 1. Configure the App
 
-1. **Device MAC Address**: Enter your R50 rowing machine's Bluetooth MAC address, or use the scan feature to discover nearby devices
+1. **Device MAC Address**: Enter your R50 rowing machine's Bluetooth MAC address, or use the sca n feature to discover nearby devices
 2. **FTMS for Zwift**: Enable this to advertise the rowing machine data to Zwift
 3. **Machine Type**: Choose between:
    - **Rower**: Advertises as a rowing machine (for Zwift rowing workouts)

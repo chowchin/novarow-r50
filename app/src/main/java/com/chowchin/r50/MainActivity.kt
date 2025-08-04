@@ -83,7 +83,7 @@ data class BluetoothDeviceInfo(
 
 class MainActivity : ComponentActivity() {
     companion object {
-        const val APP_VERSION = "v1.2.3"
+        const val APP_VERSION = "v1.2.5"
     }
 
     private var deviceMac = ""
@@ -123,6 +123,12 @@ class MainActivity : ComponentActivity() {
 
     // State for current rowing data
     private var currentRowingData: MutableState<RowingData?> = mutableStateOf(null)
+    
+    // MQTT connection status
+    private var mqttConnectionStatus = mutableStateOf("Disconnected")
+    
+    // Bluetooth connection status
+    private var bluetoothConnectionStatus = mutableStateOf("Disconnected")
 
     // Bluetooth scanning
     private var bluetoothAdapter: BluetoothAdapter? = null
@@ -182,6 +188,12 @@ class MainActivity : ComponentActivity() {
         sharedPreferences = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val savedSettings = loadSettings()
         
+        // Initialize MQTT status
+        mqttConnectionStatus.value = "Disconnected"
+        
+        // Initialize Bluetooth status
+        bluetoothConnectionStatus.value = "Disconnected"
+        
         // Initialize FTMS Server
         ftmsServer = FTMSServer(this)
         
@@ -195,6 +207,9 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier.padding(innerPadding),
                             rowingData = currentRowingData.value,
                             ftmsConnectedDevices = if (ftmsEnabled) ftmsServer.getConnectedDevicesCount() else 0,
+                            mqttEnabled = mqttEnabled,
+                            mqttStatus = mqttConnectionStatus.value,
+                            bluetoothStatus = bluetoothConnectionStatus.value,
                             onBack = @androidx.annotation.RequiresPermission(allOf = [android.Manifest.permission.BLUETOOTH_ADVERTISE, android.Manifest.permission.BLUETOOTH_CONNECT]) {
                                 showDataScreen = false
                                 disconnectAll()
@@ -223,7 +238,10 @@ class MainActivity : ComponentActivity() {
                                 saveSettings(mac, broker, username, password, mqttEn, topic, ftmsEn, machType)
                                 checkPermissions()
                                 if (mqttEnabled) {
+                                    mqttConnectionStatus.value = "Connecting..."
                                     initializeMqtt()
+                                } else {
+                                    mqttConnectionStatus.value = "Disabled"
                                 }
                                 if (ftmsEnabled) {
                                     startFTMSServer()
@@ -233,6 +251,9 @@ class MainActivity : ComponentActivity() {
                             },
                             onDisconnect = {
                                 disconnectAll()
+                            },
+                            onSettingsChanged = { mac, broker, username, password, mqttEn, topic, ftmsEn, machType ->
+                                saveSettings(mac, broker, username, password, mqttEn, topic, ftmsEn, machType)
                             },
                             onScanDevices = {
                                 startBluetoothScan()
@@ -262,9 +283,11 @@ class MainActivity : ComponentActivity() {
             gattConnection?.close()
             gattConnection = null
             fff2Char = null
+            bluetoothConnectionStatus.value = "Disconnected"
             Log.i("BLE", "Bluetooth disconnected")
         } catch (e: Exception) {
             Log.e("BLE", "Error disconnecting Bluetooth", e)
+            bluetoothConnectionStatus.value = "Disconnected"
         }
         
         // Disconnect MQTT
@@ -272,9 +295,11 @@ class MainActivity : ComponentActivity() {
             if (mqttEnabled && ::mqttClient.isInitialized && mqttClient.isConnected) {
                 mqttClient.disconnect()
                 Log.i("MQTT", "MQTT client disconnected")
+                mqttConnectionStatus.value = "Disconnected"
             }
         } catch (e: MqttException) {
             Log.e("MQTT", "Error disconnecting MQTT client", e)
+            mqttConnectionStatus.value = "Disconnected"
         }
     }
 
@@ -385,10 +410,12 @@ class MainActivity : ComponentActivity() {
         mqttClient.setCallback(object : MqttCallbackExtended {
             override fun connectComplete(reconnect: Boolean, serverURI: String?) {
                 Log.i("MQTT", "Connected to MQTT broker: $serverURI")
+                mqttConnectionStatus.value = "Connected"
             }
 
             override fun connectionLost(cause: Throwable?) {
                 Log.w("MQTT", "MQTT connection lost", cause)
+                mqttConnectionStatus.value = "Connection Lost"
             }
 
             override fun messageArrived(topic: String?, message: MqttMessage?) {
@@ -417,14 +444,17 @@ class MainActivity : ComponentActivity() {
             mqttClient.connect(options, null, object : IMqttActionListener {
                 override fun onSuccess(asyncActionToken: IMqttToken?) {
                     Log.i("MQTT", "Successfully connected to MQTT broker")
+                    mqttConnectionStatus.value = "Connected"
                 }
 
                 override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
                     Log.e("MQTT", "Failed to connect to MQTT broker", exception)
+                    mqttConnectionStatus.value = "Failed to Connect"
                 }
             })
         } catch (e: MqttException) {
             Log.e("MQTT", "MQTT connection error", e)
+            mqttConnectionStatus.value = "Connection Error"
         }
     }
 
@@ -478,6 +508,7 @@ class MainActivity : ComponentActivity() {
 
     @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
     private fun connectToDevice() {
+        bluetoothConnectionStatus.value = "Connecting..."
         val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         val device = bluetoothManager.adapter.getRemoteDevice(deviceMac)
 
@@ -485,9 +516,24 @@ class MainActivity : ComponentActivity() {
 
             @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
             override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-                if (newState == BluetoothProfile.STATE_CONNECTED) {
-                    Log.i("BLE", "Connected to device")
-                    gatt.discoverServices()
+                when (newState) {
+                    BluetoothProfile.STATE_CONNECTED -> {
+                        Log.i("BLE", "Connected to device")
+                        bluetoothConnectionStatus.value = "Connected"
+                        gatt.discoverServices()
+                    }
+                    BluetoothProfile.STATE_DISCONNECTED -> {
+                        Log.i("BLE", "Disconnected from device")
+                        bluetoothConnectionStatus.value = "Disconnected"
+                    }
+                    BluetoothProfile.STATE_CONNECTING -> {
+                        Log.i("BLE", "Connecting to device")
+                        bluetoothConnectionStatus.value = "Connecting..."
+                    }
+                    else -> {
+                        Log.i("BLE", "Connection state changed: $newState")
+                        bluetoothConnectionStatus.value = "Connection Error"
+                    }
                 }
             }
 
@@ -644,7 +690,10 @@ fun RowingDataScreen(
     modifier: Modifier = Modifier,
     rowingData: RowingData?,
     onBack: () -> Unit,
-    ftmsConnectedDevices: Int = 0
+    ftmsConnectedDevices: Int = 0,
+    mqttEnabled: Boolean = false,
+    mqttStatus: String = "Disconnected",
+    bluetoothStatus: String = "Disconnected"
 ) {
     Column(
         modifier = modifier
@@ -755,6 +804,39 @@ fun RowingDataScreen(
                 modifier = Modifier.padding(top = 4.dp)
             )
             
+            if (mqttEnabled) {
+                Text(
+                    text = "MQTT: $mqttStatus",
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                    color = when (mqttStatus) {
+                        "Connected" -> androidx.compose.material3.MaterialTheme.colorScheme.primary
+                        "Connecting..." -> androidx.compose.material3.MaterialTheme.colorScheme.secondary
+                        "Failed to Connect", "Connection Lost" -> androidx.compose.material3.MaterialTheme.colorScheme.error
+                        else -> androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            } else {
+                Text(
+                    text = "MQTT: Disabled",
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
+            
+            Text(
+                text = "Bluetooth: $bluetoothStatus",
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                color = when (bluetoothStatus) {
+                    "Connected" -> androidx.compose.material3.MaterialTheme.colorScheme.primary
+                    "Connecting..." -> androidx.compose.material3.MaterialTheme.colorScheme.secondary
+                    "Connection Error" -> androidx.compose.material3.MaterialTheme.colorScheme.error
+                    else -> androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                modifier = Modifier.padding(top = 4.dp)
+            )
+            
             if (ftmsConnectedDevices > 0) {
                 Text(
                     text = "FTMS: $ftmsConnectedDevices Zwift device(s) connected",
@@ -861,6 +943,7 @@ fun ConfigurationScreen(
     initialMachineType: FTMSServer.MachineType = FTMSServer.MachineType.ROWER,
     onConnect: (String, String, String, String, Boolean, String, Boolean, FTMSServer.MachineType) -> Unit,
     onDisconnect: () -> Unit,
+    onSettingsChanged: (String, String, String, String, Boolean, String, Boolean, FTMSServer.MachineType) -> Unit = { _, _, _, _, _, _, _, _ -> },
     onScanDevices: () -> Unit = {},
     discoveredDevices: List<BluetoothDeviceInfo> = emptyList(),
     isScanning: Boolean = false
@@ -876,6 +959,21 @@ fun ConfigurationScreen(
     var isConnected by remember { mutableStateOf(false) }
     var showSavedMessage by remember { mutableStateOf(false) }
     var showDeviceDialog by remember { mutableStateOf(false) }
+    var showAutoSaveIndicator by remember { mutableStateOf(false) }
+
+    // Helper function to trigger auto-save with visual feedback
+    fun triggerAutoSave() {
+        onSettingsChanged(deviceMac, mqttBroker, mqttUsername, mqttPassword, mqttEnabled, mqttTopic, ftmsEnabled, machineType)
+        showAutoSaveIndicator = true
+    }
+
+    // Auto-hide the auto-save indicator after 1.5 seconds
+    LaunchedEffect(showAutoSaveIndicator) {
+        if (showAutoSaveIndicator) {
+            kotlinx.coroutines.delay(1500)
+            showAutoSaveIndicator = false
+        }
+    }
 
     Column(
         modifier = modifier
@@ -900,7 +998,10 @@ fun ConfigurationScreen(
         ) {
             TextField(
                 value = deviceMac,
-                onValueChange = { deviceMac = it },
+                onValueChange = { 
+                    deviceMac = it
+                    triggerAutoSave()
+                },
                 label = { Text("Device MAC Address") },
                 placeholder = { Text("") },
                 modifier = Modifier.weight(1f),
@@ -953,7 +1054,10 @@ fun ConfigurationScreen(
             }
             Switch(
                 checked = ftmsEnabled,
-                onCheckedChange = { ftmsEnabled = it },
+                onCheckedChange = { 
+                    ftmsEnabled = it
+                    triggerAutoSave()
+                },
                 enabled = !isConnected
             )
         }
@@ -976,12 +1080,16 @@ fun ConfigurationScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.clickable(enabled = !isConnected) {
                         machineType = FTMSServer.MachineType.ROWER
+                        triggerAutoSave()
                     }
                 ) {
                     androidx.compose.material3.RadioButton(
                         selected = machineType == FTMSServer.MachineType.ROWER,
                         onClick = { 
-                            if (!isConnected) machineType = FTMSServer.MachineType.ROWER 
+                            if (!isConnected) {
+                                machineType = FTMSServer.MachineType.ROWER
+                                triggerAutoSave()
+                            }
                         },
                         enabled = !isConnected
                     )
@@ -995,12 +1103,16 @@ fun ConfigurationScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.clickable(enabled = !isConnected) {
                         machineType = FTMSServer.MachineType.BIKE
+                        triggerAutoSave()
                     }
                 ) {
                     androidx.compose.material3.RadioButton(
                         selected = machineType == FTMSServer.MachineType.BIKE,
                         onClick = { 
-                            if (!isConnected) machineType = FTMSServer.MachineType.BIKE 
+                            if (!isConnected) {
+                                machineType = FTMSServer.MachineType.BIKE
+                                triggerAutoSave()
+                            }
                         },
                         enabled = !isConnected
                     )
@@ -1042,7 +1154,10 @@ fun ConfigurationScreen(
             )
             Switch(
                 checked = mqttEnabled,
-                onCheckedChange = { mqttEnabled = it },
+                onCheckedChange = { 
+                    mqttEnabled = it
+                    triggerAutoSave()
+                },
                 enabled = !isConnected
             )
         }
@@ -1051,7 +1166,10 @@ fun ConfigurationScreen(
 
         TextField(
             value = mqttBroker,
-            onValueChange = { mqttBroker = it },
+            onValueChange = { 
+                mqttBroker = it
+                triggerAutoSave()
+            },
             label = { Text("MQTT Broker URI") },
             placeholder = { Text("tcp://mqtt.example.com:1883") },
             modifier = Modifier.fillMaxWidth(),
@@ -1062,7 +1180,10 @@ fun ConfigurationScreen(
 
         TextField(
             value = mqttUsername,
-            onValueChange = { mqttUsername = it },
+            onValueChange = { 
+                mqttUsername = it
+                triggerAutoSave()
+            },
             label = { Text("MQTT Username") },
             placeholder = { Text("username") },
             modifier = Modifier.fillMaxWidth(),
@@ -1073,7 +1194,10 @@ fun ConfigurationScreen(
 
         TextField(
             value = mqttPassword,
-            onValueChange = { mqttPassword = it },
+            onValueChange = { 
+                mqttPassword = it
+                triggerAutoSave()
+            },
             label = { Text("MQTT Password") },
             placeholder = { Text("password") },
             modifier = Modifier.fillMaxWidth(),
@@ -1084,7 +1208,10 @@ fun ConfigurationScreen(
 
         TextField(
             value = mqttTopic,
-            onValueChange = { mqttTopic = it },
+            onValueChange = { 
+                mqttTopic = it
+                triggerAutoSave()
+            },
             label = { Text("MQTT Topic") },
             placeholder = { Text("r50/rowing_data") },
             modifier = Modifier.fillMaxWidth(),
@@ -1092,6 +1219,16 @@ fun ConfigurationScreen(
         )
 
         Spacer(modifier = Modifier.height(32.dp))
+
+        // Auto-save indicator
+        if (showAutoSaveIndicator) {
+            Text(
+                text = "⚡ Settings saved automatically",
+                color = androidx.compose.material3.MaterialTheme.colorScheme.secondary,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+        }
 
         Button(
             onClick = {
@@ -1184,6 +1321,7 @@ fun ConfigurationScreen(
             isScanning = isScanning,
             onDeviceSelected = { device ->
                 deviceMac = device.address
+                triggerAutoSave()
                 showDeviceDialog = false
             },
             onDismiss = { showDeviceDialog = false },
@@ -1305,6 +1443,9 @@ fun RowingDataScreenPreview() {
                 power = 180,
                 gear = 5
             ),
+            mqttEnabled = true,
+            mqttStatus = "Connected",
+            bluetoothStatus = "Connected",
             onBack = { }
         )
     }
@@ -1316,7 +1457,8 @@ fun ConfigurationScreenPreview() {
     R50ConnectorTheme {
         ConfigurationScreen(
             onConnect = { _, _, _, _, _, _, _, _ -> },
-            onDisconnect = { }
+            onDisconnect = { },
+            onSettingsChanged = { _, _, _, _, _, _, _, _ -> }
         )
     }
 }
