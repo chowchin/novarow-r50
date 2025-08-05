@@ -77,4 +77,24 @@ class RowingRepository(
     
     suspend fun getDataPointCount(sessionId: Long): Int = 
         dataPointDao.getDataPointCount(sessionId)
+    
+    // Strava operations
+    suspend fun getUnuploadedSessions(): List<RowingSession> = 
+        sessionDao.getUnuploadedSessions()
+    
+    suspend fun getFailedUploadSessions(): List<RowingSession> = 
+        sessionDao.getFailedUploadSessions()
+    
+    suspend fun updateSessionStravaStatus(sessionId: Long, status: StravaUploadStatus) {
+        sessionDao.updateStravaUploadStatus(sessionId, status)
+    }
+    
+    suspend fun updateSessionStravaUpload(
+        sessionId: Long, 
+        status: StravaUploadStatus, 
+        activityId: Long?, 
+        attempts: Int
+    ) {
+        sessionDao.updateStravaUploadStatus(sessionId, status, activityId)
+    }
 }

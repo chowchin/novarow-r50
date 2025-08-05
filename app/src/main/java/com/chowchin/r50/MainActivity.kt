@@ -18,7 +18,6 @@ import androidx.annotation.RequiresApi
 import androidx.annotation.RequiresPermission
 import androidx.core.app.ActivityCompat
 import com.chowchin.r50.ui.theme.R50ConnectorTheme
-import com.chowchin.r50.ftms.FTMSServer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.Column
@@ -87,7 +86,7 @@ data class BluetoothDeviceInfo(
 
 class MainActivity : ComponentActivity() {
     companion object {
-        const val APP_VERSION = "v1.2.7"
+        const val APP_VERSION = "v1.2.9"
     }
 
     private var deviceMac = ""
@@ -108,8 +107,6 @@ class MainActivity : ComponentActivity() {
     private val KEY_MQTT_PASSWORD = "mqtt_password"
     private val KEY_MQTT_ENABLED = "mqtt_enabled"
     private val KEY_MQTT_TOPIC = "mqtt_topic"
-    private val KEY_FTMS_ENABLED = "ftms_enabled"
-    private val KEY_MACHINE_TYPE = "machine_type"
 
     // MQTT Configuration
     private lateinit var mqttClient: MqttAsyncClient
@@ -126,11 +123,6 @@ class MainActivity : ComponentActivity() {
     private var mqttReconnectJob: Job? = null
     private val mqttReconnectDelays = listOf(1000L, 2000L, 5000L, 10000L, 30000L) // Progressive delays in milliseconds
     
-    // FTMS Configuration
-    private var ftmsEnabled = false
-    private var machineType = FTMSServer.MachineType.ROWER
-    private lateinit var ftmsServer: FTMSServer
-
     // State for current rowing data
     private var currentRowingData: MutableState<RowingData?> = mutableStateOf(null)
     
@@ -215,14 +207,11 @@ class MainActivity : ComponentActivity() {
         // Initialize Bluetooth status
         bluetoothConnectionStatus.value = "Disconnected"
         
-        // Initialize FTMS Server
-        ftmsServer = FTMSServer(this)
-        
         setContent {
             R50ConnectorTheme {
                 var showDataScreen by remember { mutableStateOf(false) }
                 var showRecordsScreen by remember { mutableStateOf(false) }
-                
+
                 // Manage wake lock based on showDataScreen state
                 LaunchedEffect(showDataScreen) {
                     if (showDataScreen) {
@@ -240,11 +229,11 @@ class MainActivity : ComponentActivity() {
                                 onBack = { showRecordsScreen = false }
                             )
                         }
+
                         showDataScreen -> {
                             RowingDataScreen(
                                 modifier = Modifier.padding(innerPadding),
                                 rowingData = currentRowingData.value,
-                                ftmsConnectedDevices = 0, // FTMS temporarily disabled
                                 mqttEnabled = mqttEnabled,
                                 mqttStatus = mqttConnectionStatus.value,
                                 bluetoothStatus = bluetoothConnectionStatus.value,
@@ -263,18 +252,14 @@ class MainActivity : ComponentActivity() {
                             initialMqttPassword = savedSettings[KEY_MQTT_PASSWORD]!!,
                             initialMqttEnabled = savedSettings[KEY_MQTT_ENABLED]?.toBoolean() ?: true,
                             initialMqttTopic = savedSettings[KEY_MQTT_TOPIC] ?: ("r50/rowing_data"),
-                            initialFtmsEnabled = false, // FTMS temporarily disabled
-                            initialMachineType = FTMSServer.MachineType.ROWER, // Default value
-                            onConnect = { mac, broker, username, password, mqttEn, topic, ftmsEn, machType ->
+                            onConnect = { mac, broker, username, password, mqttEn, topic ->
                                 deviceMac = mac
                                 mqttServerUri = broker
                                 mqttUsername = username
                                 mqttPassword = password
                                 mqttEnabled = mqttEn
                                 mqttTopic = topic
-                                ftmsEnabled = false // FTMS temporarily disabled
-                                machineType = machType
-                                saveSettings(mac, broker, username, password, mqttEn, topic, false, machType)
+                                saveSettings(mac, broker, username, password, mqttEn, topic)
                                 checkPermissions()
                                 if (mqttEnabled) {
                                     mqttConnectionStatus.value = "Connecting..."
@@ -282,17 +267,13 @@ class MainActivity : ComponentActivity() {
                                 } else {
                                     mqttConnectionStatus.value = "Disabled"
                                 }
-                                // FTMS temporarily disabled
-                                // if (ftmsEnabled) {
-                                //     startFTMSServer()
-                                // }
                                 connectToDevice()
                                 startDatabaseRecording()
                                 showDataScreen = true
                             },
                             onViewRecords = { showRecordsScreen = true },
-                            onSettingsChanged = { mac, broker, username, password, mqttEn, topic, ftmsEn, machType ->
-                                saveSettings(mac, broker, username, password, mqttEn, topic, ftmsEn, machType)
+                            onSettingsChanged = { mac, broker, username, password, mqttEn, topic ->
+                                saveSettings(mac, broker, username, password, mqttEn, topic)
                             },
                             onScanDevices = {
                                 startBluetoothScan()
@@ -314,12 +295,7 @@ class MainActivity : ComponentActivity() {
         
         // Stop database recording
         stopDatabaseRecording()
-        
-        // Stop FTMS Server - temporarily disabled
-        // if (ftmsEnabled) {
-        //     stopFTMSServer()
-        // }
-        
+
         // Disconnect Bluetooth
         try {
             gattConnection?.disconnect()
@@ -401,7 +377,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun saveSettings(mac: String, uri: String, username: String, password: String, mqttEnabled: Boolean, topic: String, ftmsEnabled: Boolean, machineType: FTMSServer.MachineType) {
+    private fun saveSettings(mac: String, uri: String, username: String, password: String, mqttEnabled: Boolean, topic: String) {
         with(sharedPreferences.edit()) {
             putString(KEY_DEVICE_MAC, mac)
             putString(KEY_MQTT_URI, uri)
@@ -409,8 +385,6 @@ class MainActivity : ComponentActivity() {
             putString(KEY_MQTT_PASSWORD, password)
             putBoolean(KEY_MQTT_ENABLED, mqttEnabled)
             putString(KEY_MQTT_TOPIC, topic)
-            putBoolean(KEY_FTMS_ENABLED, ftmsEnabled)
-            putString(KEY_MACHINE_TYPE, machineType.name)
             apply()
         }
         Log.i("Settings", "Settings saved successfully")
@@ -423,9 +397,7 @@ class MainActivity : ComponentActivity() {
             KEY_MQTT_USERNAME to sharedPreferences.getString(KEY_MQTT_USERNAME, "")!!,
             KEY_MQTT_PASSWORD to sharedPreferences.getString(KEY_MQTT_PASSWORD, "")!!,
             KEY_MQTT_ENABLED to sharedPreferences.getBoolean(KEY_MQTT_ENABLED, false).toString(),
-            KEY_MQTT_TOPIC to sharedPreferences.getString(KEY_MQTT_TOPIC, "r50/rowing_data")!!,
-            KEY_FTMS_ENABLED to sharedPreferences.getBoolean(KEY_FTMS_ENABLED, false).toString(),
-            KEY_MACHINE_TYPE to sharedPreferences.getString(KEY_MACHINE_TYPE, FTMSServer.MachineType.ROWER.name)!!
+            KEY_MQTT_TOPIC to sharedPreferences.getString(KEY_MQTT_TOPIC, "r50/rowing_data")!!
         )
     }
 
@@ -615,25 +587,6 @@ class MainActivity : ComponentActivity() {
         mqttReconnectJob = null
     }
 
-    @RequiresPermission(allOf = [Manifest.permission.BLUETOOTH_ADVERTISE, Manifest.permission.BLUETOOTH_CONNECT])
-    private fun startFTMSServer() {
-        ftmsServer.setMachineType(machineType)
-        if (ftmsServer.startServer()) {
-            if (ftmsServer.startAdvertising()) {
-                Log.i("FTMS", "FTMS Server started and advertising as $machineType")
-            } else {
-                Log.e("FTMS", "Failed to start FTMS advertising")
-            }
-        } else {
-            Log.e("FTMS", "Failed to start FTMS server")
-        }
-    }
-
-    @RequiresPermission(allOf = [Manifest.permission.BLUETOOTH_ADVERTISE, Manifest.permission.BLUETOOTH_CONNECT])
-    private fun stopFTMSServer() {
-        ftmsServer.stopServer()
-        Log.i("FTMS", "FTMS Server stopped")
-    }
 
     // Database recording functions
     private fun startDatabaseRecording() {
@@ -662,6 +615,7 @@ class MainActivity : ComponentActivity() {
                 try {
                     repository.completeSession(sessionId)
                     Log.i("Database", "Completed session: $sessionId")
+                    
                     currentSessionId = null
                 } catch (e: Exception) {
                     Log.e("Database", "Error completing session", e)
@@ -799,11 +753,6 @@ class MainActivity : ComponentActivity() {
                     
                     // Publish to MQTT
                     publishToMqtt(jsonMessage)
-                    
-                    // Send to FTMS if enabled - temporarily disabled
-                    // if (ftmsEnabled) {
-                    //     ftmsServer.updateRowingData(rowingData)
-                    // }
                 }
             }
 
@@ -870,11 +819,6 @@ class MainActivity : ComponentActivity() {
             stopBluetoothScan()
         }
         
-        // Stop FTMS Server - temporarily disabled
-        // if (ftmsEnabled && ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADVERTISE) == PackageManager.PERMISSION_GRANTED) {
-        //     stopFTMSServer()
-        // }
-        
         try {
             if (mqttEnabled && ::mqttClient.isInitialized && mqttClient.isConnected) {
                 mqttClient.disconnect()
@@ -893,7 +837,6 @@ fun RowingDataScreen(
     modifier: Modifier = Modifier,
     rowingData: RowingData?,
     onBack: () -> Unit,
-    ftmsConnectedDevices: Int = 0,
     mqttEnabled: Boolean = false,
     mqttStatus: String = "Disconnected",
     bluetoothStatus: String = "Disconnected"
@@ -1041,18 +984,6 @@ fun RowingDataScreen(
                 },
                 modifier = Modifier.padding(top = 4.dp)
             )
-            
-            // FTMS temporarily disabled
-            /*
-            if (ftmsConnectedDevices > 0) {
-                Text(
-                    text = "FTMS: $ftmsConnectedDevices Zwift device(s) connected",
-                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                    color = androidx.compose.material3.MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-            }
-            */
         } else {
             Box(
                 modifier = Modifier.fillMaxWidth(),
@@ -1173,12 +1104,10 @@ fun ConfigurationScreen(
     initialMqttPassword: String = "",
     initialMqttEnabled: Boolean = false,
     initialMqttTopic: String = "r50/rowing_data",
-    initialFtmsEnabled: Boolean = false,
-    initialMachineType: FTMSServer.MachineType = FTMSServer.MachineType.ROWER,
-    onConnect: (String, String, String, String, Boolean, String, Boolean, FTMSServer.MachineType) -> Unit,
+    onConnect: (String, String, String, String, Boolean, String) -> Unit,
     onViewRecords: () -> Unit = {},
     onDisconnect: () -> Unit = {},
-    onSettingsChanged: (String, String, String, String, Boolean, String, Boolean, FTMSServer.MachineType) -> Unit = { _, _, _, _, _, _, _, _ -> },
+    onSettingsChanged: (String, String, String, String, Boolean, String) -> Unit = { _, _, _, _, _, _ -> },
     onScanDevices: () -> Unit = {},
     discoveredDevices: List<BluetoothDeviceInfo> = emptyList(),
     isScanning: Boolean = false
@@ -1189,8 +1118,6 @@ fun ConfigurationScreen(
     var mqttPassword by remember { mutableStateOf(initialMqttPassword) }
     var mqttEnabled by remember { mutableStateOf(initialMqttEnabled) }
     var mqttTopic by remember { mutableStateOf(initialMqttTopic) }
-    var ftmsEnabled by remember { mutableStateOf(initialFtmsEnabled) }
-    var machineType by remember { mutableStateOf(initialMachineType) }
     var isConnected by remember { mutableStateOf(false) }
     var showSavedMessage by remember { mutableStateOf(false) }
     var showDeviceDialog by remember { mutableStateOf(false) }
@@ -1199,7 +1126,7 @@ fun ConfigurationScreen(
 
     // Helper function to trigger auto-save with visual feedback
     fun triggerAutoSave() {
-        onSettingsChanged(deviceMac, mqttBroker, mqttUsername, mqttPassword, mqttEnabled, mqttTopic, ftmsEnabled, machineType)
+        onSettingsChanged(deviceMac, mqttBroker, mqttUsername, mqttPassword, mqttEnabled, mqttTopic)
         showAutoSaveIndicator = true
     }
 
@@ -1265,116 +1192,6 @@ fun ConfigurationScreen(
         }
 
         Spacer(modifier = Modifier.height(24.dp))
-
-        // FTMS Configuration temporarily hidden - not functioning yet
-        /*
-        Text(
-            text = "FTMS Configuration (for Zwift)",
-            style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(bottom = 8.dp)
-        )
-
-        // FTMS Enable/Disable Switch
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Enable FTMS for Zwift",
-                    style = androidx.compose.material3.MaterialTheme.typography.bodyLarge
-                )
-                Text(
-                    text = "Advertise as fitness machine to Zwift app",
-                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Switch(
-                checked = ftmsEnabled,
-                onCheckedChange = { 
-                    ftmsEnabled = it
-                    triggerAutoSave()
-                },
-                enabled = !isConnected
-            )
-        }
-
-        // Machine Type Selection (only show when FTMS is enabled)
-        if (ftmsEnabled) {
-            Spacer(modifier = Modifier.height(16.dp))
-            
-            Text(
-                text = "Machine Type",
-                style = androidx.compose.material3.MaterialTheme.typography.bodyLarge,
-                modifier = Modifier.padding(bottom = 8.dp)
-            )
-            
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.clickable(enabled = !isConnected) {
-                        machineType = FTMSServer.MachineType.ROWER
-                        triggerAutoSave()
-                    }
-                ) {
-                    androidx.compose.material3.RadioButton(
-                        selected = machineType == FTMSServer.MachineType.ROWER,
-                        onClick = { 
-                            if (!isConnected) {
-                                machineType = FTMSServer.MachineType.ROWER
-                                triggerAutoSave()
-                            }
-                        },
-                        enabled = !isConnected
-                    )
-                    Text(
-                        text = "Rower",
-                        modifier = Modifier.padding(start = 8.dp)
-                    )
-                }
-                
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.clickable(enabled = !isConnected) {
-                        machineType = FTMSServer.MachineType.BIKE
-                        triggerAutoSave()
-                    }
-                ) {
-                    androidx.compose.material3.RadioButton(
-                        selected = machineType == FTMSServer.MachineType.BIKE,
-                        onClick = { 
-                            if (!isConnected) {
-                                machineType = FTMSServer.MachineType.BIKE
-                                triggerAutoSave()
-                            }
-                        },
-                        enabled = !isConnected
-                    )
-                    Text(
-                        text = "Bike",
-                        modifier = Modifier.padding(start = 8.dp)
-                    )
-                }
-            }
-            
-            Text(
-                text = when (machineType) {
-                    FTMSServer.MachineType.ROWER -> "Rowing data will be sent as-is to Zwift"
-                    FTMSServer.MachineType.BIKE -> "Rowing data will be converted to bike metrics (stroke rate → cadence, power stays same)"
-                },
-                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 8.dp)
-            )
-        }
-
-        Spacer(modifier = Modifier.height(24.dp))
-        */
 
         Text(
             text = "MQTT Configuration",
@@ -1462,7 +1279,7 @@ fun ConfigurationScreen(
             singleLine = true
         )
 
-        Spacer(modifier = Modifier.height(32.dp))
+        Spacer(modifier = Modifier.height(24.dp))
 
         // Auto-save indicator
         if (showAutoSaveIndicator) {
@@ -1479,7 +1296,7 @@ fun ConfigurationScreen(
                 if (!isConnected) {
                     isConnected = true
                     showSavedMessage = true
-                    onConnect(deviceMac, mqttBroker, mqttUsername, mqttPassword, mqttEnabled, mqttTopic, ftmsEnabled, machineType)
+                    onConnect(deviceMac, mqttBroker, mqttUsername, mqttPassword, mqttEnabled, mqttTopic)
                 }
             },
             modifier = Modifier.fillMaxWidth(),
@@ -1531,14 +1348,6 @@ fun ConfigurationScreen(
             val statusMessage = buildString {
                 append("✓ Connected to device")
                 if (mqttEnabled) append(" and MQTT broker")
-                // FTMS temporarily disabled
-                // if (ftmsEnabled) {
-                //     val machineTypeName = when (machineType) {
-                //         FTMSServer.MachineType.ROWER -> "rower"
-                //         FTMSServer.MachineType.BIKE -> "bike"
-                //     }
-                //     append(" and advertising as $machineTypeName to Zwift")
-                // }
                 if (!mqttEnabled) append(" only")
             }
             Text(
@@ -1734,12 +1543,13 @@ fun RowingDataScreenPreview() {
 fun ConfigurationScreenPreview() {
     R50ConnectorTheme {
         ConfigurationScreen(
-            onConnect = { _, _, _, _, _, _, _, _ -> },
+            onConnect = { _, _, _, _, _, _ -> },
             onDisconnect = { },
-            onSettingsChanged = { _, _, _, _, _, _, _, _ -> }
+            onSettingsChanged = { _, _, _, _, _, _ -> }
         )
     }
 }
+
 
 @Composable
 fun RecordsScreen(

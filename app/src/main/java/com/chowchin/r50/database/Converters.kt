@@ -13,4 +13,14 @@ class Converters {
     fun dateToTimestamp(date: Date?): Long? {
         return date?.time
     }
+    
+    @TypeConverter
+    fun fromStravaUploadStatus(status: StravaUploadStatus): String {
+        return status.name
+    }
+    
+    @TypeConverter
+    fun toStravaUploadStatus(status: String): StravaUploadStatus {
+        return StravaUploadStatus.valueOf(status)
+    }
 }

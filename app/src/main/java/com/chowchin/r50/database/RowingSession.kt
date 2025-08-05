@@ -17,5 +17,16 @@ data class RowingSession(
     val averageSPM: Float = 0f,
     val averagePower: Float = 0f,
     val maxPower: Int = 0,
-    val isCompleted: Boolean = false
+    val isCompleted: Boolean = false,
+    val stravaUploadStatus: StravaUploadStatus = StravaUploadStatus.NOT_UPLOADED,
+    val stravaActivityId: Long? = null,
+    val stravaUploadAttempts: Int = 0,
+    val lastStravaUploadAttempt: Date? = null
 )
+
+enum class StravaUploadStatus {
+    NOT_UPLOADED,
+    UPLOADING,
+    UPLOADED,
+    FAILED
+}
