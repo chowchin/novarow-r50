@@ -1,4 +1,4 @@
-"# R50 Connector - Rowing Machine to Zwift Bridge
+# R50 Connector - Rowing Machine to Zwift Bridge
 
 An Android application that connects to R50 rowing machines via Bluetooth and save the records.
 
@@ -73,4 +73,4 @@ The app requires the following Android permissions:
 
 ## License
 
-This project is open source. Please ensure compliance with any applicable rowing machine manufacturer APIs and protocols." 
+This project is open source. Please ensure compliance with any applicable rowing machine manufacturer APIs and protocols.
