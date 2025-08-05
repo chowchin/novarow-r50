@@ -1,11 +1,13 @@
-# R50 Connector - Rowing Machine to Zwift Bridge
+# R50 Connector - Rowing Machine to Fitness Apps Bridge
 
-An Android application that connects to R50 rowing machines via Bluetooth and save the records.
+An Android application that connects to R50 rowing machines via Bluetooth and enables integration with fitness apps like Zwift, TrainerRoad, and others.
 
 ## Features
 
 - **Bluetooth Connection**: Connects to R50 rowing machines via Bluetooth Low Energy
+- **FTMS Support**: Acts as a Bluetooth LE rowing machine for fitness apps (Zwift, TrainerRoad, etc.)
 - **MQTT Publishing**: Optional data publishing to MQTT brokers
+- **Session Recording**: Save and export rowing sessions as FIT files
 - **Real-time Data**: Displays live rowing metrics including:
   - Elapsed time
   - Stroke count and rate (SPM)
@@ -15,12 +17,24 @@ An Android application that connects to R50 rowing machines via Bluetooth and sa
   - Heart rate
   - Resistance level
 
+## New: FTMS (Fitness Machine Service) Integration
+
+The app now supports FTMS, allowing it to work as a Bluetooth LE rowing machine that can be discovered and used by fitness applications:
+
+- **Compatible Apps**: Zwift, TrainerRoad, Kinomap, MyWhoosh, and other FTMS-supporting apps
+- **Real-time Broadcasting**: All rowing metrics are broadcast in standard FTMS format
+- **Multiple Connections**: Can connect to multiple fitness apps simultaneously
+- **Standard Compliance**: Follows official FTMS specification for rowing machines
+
+See [FTMS_GUIDE.md](FTMS_GUIDE.md) for detailed setup and usage instructions.
+
 ## Setup Instructions
 
 ### 1. Configure the App
 
-1. **Device MAC Address**: Enter your R50 rowing machine's Bluetooth MAC address, or use the sca n feature to discover nearby devices
-2. **MQTT (Optional)**: Configure MQTT broker settings if you want to publish data to external systems
+1. **Device MAC Address**: Enter your R50 rowing machine's Bluetooth MAC address, or use the scan feature to discover nearby devices
+2. **FTMS (Recommended)**: Enable FTMS service to use with fitness apps like Zwift
+3. **MQTT (Optional)**: Configure MQTT broker settings if you want to publish data to external systems
 
 ## Permissions
 

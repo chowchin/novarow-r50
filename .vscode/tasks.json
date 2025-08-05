@@ -1,0 +1,15 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build R50 with FTMS",
+			"type": "shell",
+			"command": "./gradlew assembleDebug",
+			"group": "build",
+			"isBackground": false,
+			"problemMatcher": [
+				"$gradle"
+			]
+		}
+	]
+}

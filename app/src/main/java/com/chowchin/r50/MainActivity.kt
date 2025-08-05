@@ -64,6 +64,13 @@ import java.util.*
 import com.chowchin.r50.database.*
 import kotlinx.coroutines.*
 import java.util.concurrent.Executors
+import com.chowchin.r50.fit.FitFileGenerator
+import android.content.ContentValues
+import android.provider.MediaStore
+import android.widget.Toast
+import java.io.IOException
+import com.chowchin.r50.ftms.FTMSManager
+import com.chowchin.r50.ui.FTMSConfigurationScreen
 
 data class RowingData(
     val hex: String,
@@ -107,6 +114,7 @@ class MainActivity : ComponentActivity() {
     private val KEY_MQTT_PASSWORD = "mqtt_password"
     private val KEY_MQTT_ENABLED = "mqtt_enabled"
     private val KEY_MQTT_TOPIC = "mqtt_topic"
+    private val KEY_FTMS_ENABLED = "ftms_enabled"
 
     // MQTT Configuration
     private lateinit var mqttClient: MqttAsyncClient
@@ -131,6 +139,11 @@ class MainActivity : ComponentActivity() {
     
     // Bluetooth connection status
     private var bluetoothConnectionStatus = mutableStateOf("Disconnected")
+    
+    // FTMS (Fitness Machine Service) support
+    private lateinit var ftmsManager: FTMSManager
+    private var ftmsEnabled = false
+    private var ftmsConnectionStatus = mutableStateOf("Stopped")
 
     // Database components
     private lateinit var database: RowingDatabase
@@ -203,10 +216,23 @@ class MainActivity : ComponentActivity() {
         mqttPassword = savedSettings[KEY_MQTT_PASSWORD]!!
         mqttEnabled = savedSettings[KEY_MQTT_ENABLED]?.toBoolean() ?: false
         mqttTopic = savedSettings[KEY_MQTT_TOPIC] ?: "r50/rowing_data"
+        ftmsEnabled = savedSettings[KEY_FTMS_ENABLED]?.toBoolean() ?: false
         
         // Initialize database
         database = RowingDatabase.getDatabase(this)
         repository = RowingRepository(database.rowingSessionDao(), database.rowingDataPointDao())
+        
+        // Initialize FTMS Manager
+        ftmsManager = FTMSManager(this)
+        ftmsManager.onServiceStarted = {
+            ftmsConnectionStatus.value = "Advertising"
+        }
+        ftmsManager.onServiceStopped = {
+            ftmsConnectionStatus.value = "Stopped"
+        }
+        ftmsManager.onDeviceConnected = { deviceCount ->
+            ftmsConnectionStatus.value = ftmsManager.getServiceStatus()
+        }
         
         // Initialize MQTT status
         mqttConnectionStatus.value = "Disconnected"
@@ -219,6 +245,7 @@ class MainActivity : ComponentActivity() {
                 var showDataScreen by remember { mutableStateOf(false) }
                 var showRecordsScreen by remember { mutableStateOf(false) }
                 var showMqttConfigScreen by remember { mutableStateOf(false) }
+                var showFtmsConfigScreen by remember { mutableStateOf(false) }
 
                 // Manage wake lock based on showDataScreen state
                 LaunchedEffect(showDataScreen) {
@@ -258,6 +285,36 @@ class MainActivity : ComponentActivity() {
                             )
                         }
 
+                        showFtmsConfigScreen -> {
+                            FTMSConfigurationScreen(
+                                modifier = Modifier.padding(innerPadding),
+                                initialFtmsEnabled = savedSettings[KEY_FTMS_ENABLED]?.toBoolean() ?: false,
+                                onBack = { showFtmsConfigScreen = false },
+                                onSaveConfig = { ftmsEn ->
+                                    ftmsEnabled = ftmsEn
+                                    saveSettings(deviceMac, mqttServerUri, mqttUsername, mqttPassword, mqttEnabled, mqttTopic, ftmsEn)
+                                    
+                                    // Start or stop FTMS service based on the new setting
+                                    if (ftmsEn && !ftmsManager.isRunning()) {
+                                        // Only start if we have data (R50 is connected)
+                                        if (currentRowingData.value != null) {
+                                            if (ftmsManager.startService()) {
+                                                ftmsConnectionStatus.value = "Advertising"
+                                                ftmsManager.resetSession()
+                                            } else {
+                                                ftmsConnectionStatus.value = "Error"
+                                            }
+                                        } else {
+                                            ftmsConnectionStatus.value = "Waiting for R50 connection"
+                                        }
+                                    } else if (!ftmsEn && ftmsManager.isRunning()) {
+                                        ftmsManager.stopService()
+                                        ftmsConnectionStatus.value = "Stopped"
+                                    }
+                                }
+                            )
+                        }
+
                         showDataScreen -> {
                             RowingDataScreen(
                                 modifier = Modifier.padding(innerPadding),
@@ -265,6 +322,8 @@ class MainActivity : ComponentActivity() {
                                 mqttEnabled = mqttEnabled,
                                 mqttStatus = mqttConnectionStatus.value,
                                 bluetoothStatus = bluetoothConnectionStatus.value,
+                                ftmsEnabled = ftmsEnabled,
+                                ftmsStatus = ftmsConnectionStatus.value,
                                 onBack = @androidx.annotation.RequiresPermission(allOf = [android.Manifest.permission.BLUETOOTH_ADVERTISE, android.Manifest.permission.BLUETOOTH_CONNECT]) {
                                     showDataScreen = false
                                     disconnectAll()
@@ -285,12 +344,26 @@ class MainActivity : ComponentActivity() {
                                 } else {
                                     mqttConnectionStatus.value = "Disabled"
                                 }
+                                
+                                // Start FTMS if enabled
+                                if (ftmsEnabled) {
+                                    if (ftmsManager.startService()) {
+                                        ftmsConnectionStatus.value = "Advertising"
+                                        ftmsManager.resetSession()
+                                    } else {
+                                        ftmsConnectionStatus.value = "Error"
+                                    }
+                                } else {
+                                    ftmsConnectionStatus.value = "Disabled"
+                                }
+                                
                                 connectToDevice()
                                 startDatabaseRecording()
                                 showDataScreen = true
                             },
                             onViewRecords = { showRecordsScreen = true },
                             onMqttConfig = { showMqttConfigScreen = true },
+                            onFtmsConfig = { showFtmsConfigScreen = true },
                             onSettingsChanged = { mac ->
                                 saveSettings(mac, mqttServerUri, mqttUsername, mqttPassword, mqttEnabled, mqttTopic)
                             },
@@ -339,6 +412,13 @@ class MainActivity : ComponentActivity() {
         } catch (e: MqttException) {
             Log.e("MQTT", "Error disconnecting MQTT client", e)
             mqttConnectionStatus.value = "Disconnected"
+        }
+        
+        // Stop FTMS service
+        if (ftmsManager.isRunning()) {
+            ftmsManager.stopService()
+            ftmsConnectionStatus.value = "Stopped"
+            Log.i("FTMS", "FTMS service stopped")
         }
     }
 
@@ -396,7 +476,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun saveSettings(mac: String, uri: String, username: String, password: String, mqttEnabled: Boolean, topic: String) {
+    private fun saveSettings(mac: String, uri: String, username: String, password: String, mqttEnabled: Boolean, topic: String, ftmsEnabled: Boolean = this.ftmsEnabled) {
         with(sharedPreferences.edit()) {
             putString(KEY_DEVICE_MAC, mac)
             putString(KEY_MQTT_URI, uri)
@@ -404,6 +484,7 @@ class MainActivity : ComponentActivity() {
             putString(KEY_MQTT_PASSWORD, password)
             putBoolean(KEY_MQTT_ENABLED, mqttEnabled)
             putString(KEY_MQTT_TOPIC, topic)
+            putBoolean(KEY_FTMS_ENABLED, ftmsEnabled)
             apply()
         }
         Log.i("Settings", "Settings saved successfully")
@@ -416,7 +497,8 @@ class MainActivity : ComponentActivity() {
             KEY_MQTT_USERNAME to sharedPreferences.getString(KEY_MQTT_USERNAME, "")!!,
             KEY_MQTT_PASSWORD to sharedPreferences.getString(KEY_MQTT_PASSWORD, "")!!,
             KEY_MQTT_ENABLED to sharedPreferences.getBoolean(KEY_MQTT_ENABLED, false).toString(),
-            KEY_MQTT_TOPIC to sharedPreferences.getString(KEY_MQTT_TOPIC, "r50/rowing_data")!!
+            KEY_MQTT_TOPIC to sharedPreferences.getString(KEY_MQTT_TOPIC, "r50/rowing_data")!!,
+            KEY_FTMS_ENABLED to sharedPreferences.getBoolean(KEY_FTMS_ENABLED, false).toString()
         )
     }
 
@@ -770,6 +852,11 @@ class MainActivity : ComponentActivity() {
                     // Update the current rowing data state
                     currentRowingData.value = rowingData
                     
+                    // Update FTMS data if enabled
+                    if (ftmsEnabled && ftmsManager.isRunning()) {
+                        ftmsManager.updateRowingData(rowingData)
+                    }
+                    
                     // Publish to MQTT
                     publishToMqtt(jsonMessage)
                 }
@@ -847,7 +934,78 @@ class MainActivity : ComponentActivity() {
             Log.e("MQTT", "Error disconnecting MQTT client", e)
         }
         
+        // Stop FTMS service
+        if (::ftmsManager.isInitialized) {
+            ftmsManager.stopService()
+        }
+        
         gattConnection?.close()
+    }
+
+    fun exportSessionToFit(session: RowingSession, dataPoints: List<RowingDataPoint>) {
+        databaseScope.launch {
+            try {
+                val fitGenerator = FitFileGenerator()
+                val fitData = fitGenerator.generateFitFile(session, dataPoints)
+                
+                // Generate filename
+                val formatter = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault())
+                val filename = "rowing_session_${session.id}_${formatter.format(session.startTime)}.fit"
+                
+                // Save file to Downloads folder
+                val resolver = contentResolver
+                val contentValues = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
+                    put(MediaStore.MediaColumns.MIME_TYPE, "application/octet-stream")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, "Download/")
+                }
+                
+                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
+                uri?.let { fileUri ->
+                    resolver.openOutputStream(fileUri)?.use { outputStream ->
+                        outputStream.write(fitData)
+                        outputStream.flush()
+                    }
+                    
+                    // Show success message on main thread
+                    runOnUiThread {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "FIT file exported to Downloads: $filename",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                    Log.i("FitExport", "Successfully exported FIT file: $filename")
+                } ?: run {
+                    runOnUiThread {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Failed to create file in Downloads folder",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                    Log.e("FitExport", "Failed to create file URI")
+                }
+            } catch (e: IOException) {
+                Log.e("FitExport", "IO error during FIT export", e)
+                runOnUiThread {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Error writing FIT file: ${e.message}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            } catch (e: Exception) {
+                Log.e("FitExport", "Error generating FIT file", e)
+                runOnUiThread {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Error exporting FIT file: ${e.message}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
     }
 }
 
@@ -858,7 +1016,9 @@ fun RowingDataScreen(
     onBack: () -> Unit,
     mqttEnabled: Boolean = false,
     mqttStatus: String = "Disconnected",
-    bluetoothStatus: String = "Disconnected"
+    bluetoothStatus: String = "Disconnected",
+    ftmsEnabled: Boolean = false,
+    ftmsStatus: String = "Stopped"
 ) {
     var showDisconnectDialog by remember { mutableStateOf(false) }
     
@@ -1003,6 +1163,30 @@ fun RowingDataScreen(
                 },
                 modifier = Modifier.padding(top = 4.dp)
             )
+            
+            if (ftmsEnabled) {
+                Text(
+                    text = "FTMS: $ftmsStatus",
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                    color = when (ftmsStatus) {
+                        "Advertising" -> androidx.compose.material3.MaterialTheme.colorScheme.secondary
+                        "Connected (1 device)", "Connected" -> androidx.compose.material3.MaterialTheme.colorScheme.primary
+                        "Error" -> androidx.compose.material3.MaterialTheme.colorScheme.error
+                        else -> when {
+                            ftmsStatus.contains("Connected") -> androidx.compose.material3.MaterialTheme.colorScheme.primary
+                            else -> androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                        }
+                    },
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            } else {
+                Text(
+                    text = "FTMS: Disabled",
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
         } else {
             Box(
                 modifier = Modifier.fillMaxWidth(),
@@ -1300,6 +1484,13 @@ fun MqttConfigurationScreen(
     }
 }
 
+// Helper function to validate MAC address format
+fun isValidMacAddress(macAddress: String): Boolean {
+    // MAC address should be in format XX:XX:XX:XX:XX:XX or XX-XX-XX-XX-XX-XX
+    val macPattern = "^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"
+    return macAddress.matches(Regex(macPattern))
+}
+
 @Composable
 fun ConfigurationScreen(
     modifier: Modifier = Modifier,
@@ -1307,6 +1498,7 @@ fun ConfigurationScreen(
     onConnect: (String) -> Unit,
     onViewRecords: () -> Unit = {},
     onMqttConfig: () -> Unit = {},
+    onFtmsConfig: () -> Unit = {},
     onDisconnect: () -> Unit = {},
     onSettingsChanged: (String) -> Unit = { _ -> },
     onScanDevices: () -> Unit = {},
@@ -1319,6 +1511,7 @@ fun ConfigurationScreen(
     var showDeviceDialog by remember { mutableStateOf(false) }
     var showAutoSaveIndicator by remember { mutableStateOf(false) }
     var showDisconnectDialog by remember { mutableStateOf(false) }
+    var showMacRequiredDialog by remember { mutableStateOf(false) }
 
     // Helper function to trigger auto-save with visual feedback
     fun triggerAutoSave() {
@@ -1402,9 +1595,17 @@ fun ConfigurationScreen(
         Button(
             onClick = {
                 if (!isConnected) {
-                    isConnected = true
-                    showSavedMessage = true
-                    onConnect(deviceMac)
+                    // Validate MAC address is not empty and has proper format
+                    val trimmedMac = deviceMac.trim()
+                    if (trimmedMac.isEmpty()) {
+                        showMacRequiredDialog = true
+                    } else if (!isValidMacAddress(trimmedMac)) {
+                        showMacRequiredDialog = true
+                    } else {
+                        isConnected = true
+                        showSavedMessage = true
+                        onConnect(trimmedMac)
+                    }
                 }
             },
             modifier = Modifier.fillMaxWidth(),
@@ -1429,6 +1630,15 @@ fun ConfigurationScreen(
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("MQTT Configuration")
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        OutlinedButton(
+            onClick = onFtmsConfig,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("FTMS Configuration")
         }
 
         // Auto-hide the saved message after 3 seconds
@@ -1523,6 +1733,24 @@ fun ConfigurationScreen(
                     onClick = { showDisconnectDialog = false }
                 ) {
                     Text("Cancel")
+                }
+            }
+        )
+    }
+    
+    // MAC address required dialog
+    if (showMacRequiredDialog) {
+        AlertDialog(
+            onDismissRequest = { showMacRequiredDialog = false },
+            title = { Text("Invalid MAC Address") },
+            text = { 
+                Text("Please enter a valid Bluetooth MAC address for your R50 rowing machine.\n\nFormat: XX:XX:XX:XX:XX:XX (e.g., 12:34:56:78:9A:BC)\n\nYou can use the 'Scan' button to discover nearby devices or check your rowing machine's settings for the MAC address.") 
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { showMacRequiredDialog = false }
+                ) {
+                    Text("OK")
                 }
             }
         )
@@ -1645,6 +1873,8 @@ fun RowingDataScreenPreview() {
             mqttEnabled = true,
             mqttStatus = "Connected",
             bluetoothStatus = "Connected",
+            ftmsEnabled = true,
+            ftmsStatus = "Connected (1 device)",
             onBack = { }
         )
     }
@@ -1729,11 +1959,57 @@ fun RecordsScreen(
         
         if (selectedSession == null) {
             // Show sessions list
-            Text(
-                text = "Sessions",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Sessions",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold
+                )
+                
+                var showInfo by remember { mutableStateOf(false) }
+                OutlinedButton(
+                    onClick = { showInfo = true }
+                ) {
+                    Text("ℹ️ FIT Export")
+                }
+                
+                if (showInfo) {
+                    AlertDialog(
+                        onDismissRequest = { showInfo = false },
+                        title = { Text("FIT File Export") },
+                        text = {
+                            Column {
+                                Text(
+                                    text = "Export your rowing sessions as FIT files to import into fitness platforms like Strava, Garmin Connect, or other training apps.",
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    text = "• Files are saved to your Downloads folder",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                Text(
+                                    text = "• Includes distance, power, heart rate, and stroke data",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                Text(
+                                    text = "• Compatible with most fitness platforms",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                        },
+                        confirmButton = {
+                            TextButton(onClick = { showInfo = false }) {
+                                Text("Got it")
+                            }
+                        }
+                    )
+                }
+            }
             
             Spacer(modifier = Modifier.height(8.dp))
             
@@ -1825,6 +2101,19 @@ fun RecordsScreen(
                                 ) {
                                     OutlinedButton(
                                         onClick = {
+                                            // Export to FIT file
+                                            activity.databaseScope.launch {
+                                                val dataPoints = activity.repository.getDataPointsBySessionSync(session.id)
+                                                activity.exportSessionToFit(session, dataPoints)
+                                            }
+                                        },
+                                        modifier = Modifier.padding(end = 8.dp)
+                                    ) {
+                                        Text("Export FIT")
+                                    }
+                                    
+                                    OutlinedButton(
+                                        onClick = {
                                             sessionToDelete = session
                                             showDeleteDialog = true
                                         },
@@ -1855,16 +2144,29 @@ fun RecordsScreen(
                 Row {
                     OutlinedButton(
                         onClick = {
+                            // Export current session to FIT file
+                            selectedSession?.let { session ->
+                                activity.exportSessionToFit(session, dataPoints)
+                            }
+                        },
+                        modifier = Modifier.padding(end = 8.dp)
+                    ) {
+                        Text("Export FIT")
+                    }
+                    
+                    OutlinedButton(
+                        onClick = {
                             sessionToDelete = selectedSession
                             showDeleteDialog = true
                         },
                         colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
                             contentColor = MaterialTheme.colorScheme.error
-                        )
+                        ),
+                        modifier = Modifier.padding(end = 8.dp)
                     ) {
                         Text("Delete")
                     }
-                    Spacer(modifier = Modifier.width(8.dp))
+                    
                     Button(onClick = { selectedSession = null }) {
                         Text("Back")
                     }

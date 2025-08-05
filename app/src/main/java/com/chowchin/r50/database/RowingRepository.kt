@@ -67,6 +67,9 @@ class RowingRepository(
     fun getDataPointsBySession(sessionId: Long): Flow<List<RowingDataPoint>> = 
         dataPointDao.getDataPointsBySession(sessionId)
     
+    suspend fun getDataPointsBySessionSync(sessionId: Long): List<RowingDataPoint> = 
+        dataPointDao.getDataPointsBySessionSync(sessionId)
+    
     suspend fun getLatestDataPoint(sessionId: Long): RowingDataPoint? = 
         dataPointDao.getLatestDataPoint(sessionId)
     
