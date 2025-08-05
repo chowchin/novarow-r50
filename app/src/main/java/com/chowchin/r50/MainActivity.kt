@@ -197,6 +197,13 @@ class MainActivity : ComponentActivity() {
         sharedPreferences = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val savedSettings = loadSettings()
         
+        // Initialize MQTT settings from saved preferences
+        mqttServerUri = savedSettings[KEY_MQTT_URI]!!
+        mqttUsername = savedSettings[KEY_MQTT_USERNAME]!!
+        mqttPassword = savedSettings[KEY_MQTT_PASSWORD]!!
+        mqttEnabled = savedSettings[KEY_MQTT_ENABLED]?.toBoolean() ?: false
+        mqttTopic = savedSettings[KEY_MQTT_TOPIC] ?: "r50/rowing_data"
+        
         // Initialize database
         database = RowingDatabase.getDatabase(this)
         repository = RowingRepository(database.rowingSessionDao(), database.rowingDataPointDao())
@@ -211,6 +218,7 @@ class MainActivity : ComponentActivity() {
             R50ConnectorTheme {
                 var showDataScreen by remember { mutableStateOf(false) }
                 var showRecordsScreen by remember { mutableStateOf(false) }
+                var showMqttConfigScreen by remember { mutableStateOf(false) }
 
                 // Manage wake lock based on showDataScreen state
                 LaunchedEffect(showDataScreen) {
@@ -227,6 +235,26 @@ class MainActivity : ComponentActivity() {
                             RecordsScreen(
                                 modifier = Modifier.padding(innerPadding),
                                 onBack = { showRecordsScreen = false }
+                            )
+                        }
+
+                        showMqttConfigScreen -> {
+                            MqttConfigurationScreen(
+                                modifier = Modifier.padding(innerPadding),
+                                initialMqttBroker = savedSettings[KEY_MQTT_URI]!!,
+                                initialMqttUsername = savedSettings[KEY_MQTT_USERNAME]!!,
+                                initialMqttPassword = savedSettings[KEY_MQTT_PASSWORD]!!,
+                                initialMqttEnabled = savedSettings[KEY_MQTT_ENABLED]?.toBoolean() ?: true,
+                                initialMqttTopic = savedSettings[KEY_MQTT_TOPIC] ?: "r50/rowing_data",
+                                onBack = { showMqttConfigScreen = false },
+                                onSettingsChanged = { broker, username, password, mqttEn, topic ->
+                                    mqttServerUri = broker
+                                    mqttUsername = username
+                                    mqttPassword = password
+                                    mqttEnabled = mqttEn
+                                    mqttTopic = topic
+                                    saveSettings(deviceMac, broker, username, password, mqttEn, topic)
+                                }
                             )
                         }
 
@@ -247,19 +275,9 @@ class MainActivity : ComponentActivity() {
                         ConfigurationScreen(
                             modifier = Modifier.padding(innerPadding),
                             initialDeviceMac = savedSettings[KEY_DEVICE_MAC]!!,
-                            initialMqttBroker = savedSettings[KEY_MQTT_URI]!!,
-                            initialMqttUsername = savedSettings[KEY_MQTT_USERNAME]!!,
-                            initialMqttPassword = savedSettings[KEY_MQTT_PASSWORD]!!,
-                            initialMqttEnabled = savedSettings[KEY_MQTT_ENABLED]?.toBoolean() ?: true,
-                            initialMqttTopic = savedSettings[KEY_MQTT_TOPIC] ?: ("r50/rowing_data"),
-                            onConnect = { mac, broker, username, password, mqttEn, topic ->
+                            onConnect = { mac ->
                                 deviceMac = mac
-                                mqttServerUri = broker
-                                mqttUsername = username
-                                mqttPassword = password
-                                mqttEnabled = mqttEn
-                                mqttTopic = topic
-                                saveSettings(mac, broker, username, password, mqttEn, topic)
+                                saveSettings(mac, mqttServerUri, mqttUsername, mqttPassword, mqttEnabled, mqttTopic)
                                 checkPermissions()
                                 if (mqttEnabled) {
                                     mqttConnectionStatus.value = "Connecting..."
@@ -272,8 +290,9 @@ class MainActivity : ComponentActivity() {
                                 showDataScreen = true
                             },
                             onViewRecords = { showRecordsScreen = true },
-                            onSettingsChanged = { mac, broker, username, password, mqttEn, topic ->
-                                saveSettings(mac, broker, username, password, mqttEn, topic)
+                            onMqttConfig = { showMqttConfigScreen = true },
+                            onSettingsChanged = { mac ->
+                                saveSettings(mac, mqttServerUri, mqttUsername, mqttPassword, mqttEnabled, mqttTopic)
                             },
                             onScanDevices = {
                                 startBluetoothScan()
@@ -1096,28 +1115,205 @@ fun formatTime(seconds: Int?): String {
 }
 
 @Composable
-fun ConfigurationScreen(
+fun MqttConfigurationScreen(
     modifier: Modifier = Modifier,
-    initialDeviceMac: String = "",
     initialMqttBroker: String = "",
     initialMqttUsername: String = "",
     initialMqttPassword: String = "",
     initialMqttEnabled: Boolean = false,
     initialMqttTopic: String = "r50/rowing_data",
-    onConnect: (String, String, String, String, Boolean, String) -> Unit,
-    onViewRecords: () -> Unit = {},
-    onDisconnect: () -> Unit = {},
-    onSettingsChanged: (String, String, String, String, Boolean, String) -> Unit = { _, _, _, _, _, _ -> },
-    onScanDevices: () -> Unit = {},
-    discoveredDevices: List<BluetoothDeviceInfo> = emptyList(),
-    isScanning: Boolean = false
+    onBack: () -> Unit = {},
+    onSettingsChanged: (String, String, String, Boolean, String) -> Unit = { _, _, _, _, _ -> }
 ) {
-    var deviceMac by remember { mutableStateOf(initialDeviceMac) }
     var mqttBroker by remember { mutableStateOf(initialMqttBroker) }
     var mqttUsername by remember { mutableStateOf(initialMqttUsername) }
     var mqttPassword by remember { mutableStateOf(initialMqttPassword) }
     var mqttEnabled by remember { mutableStateOf(initialMqttEnabled) }
     var mqttTopic by remember { mutableStateOf(initialMqttTopic) }
+    var showAutoSaveIndicator by remember { mutableStateOf(false) }
+
+    // Helper function to trigger auto-save with visual feedback
+    fun triggerAutoSave() {
+        onSettingsChanged(mqttBroker, mqttUsername, mqttPassword, mqttEnabled, mqttTopic)
+        showAutoSaveIndicator = true
+    }
+
+    // Auto-hide the auto-save indicator after 1.5 seconds
+    LaunchedEffect(showAutoSaveIndicator) {
+        if (showAutoSaveIndicator) {
+            kotlinx.coroutines.delay(1500)
+            showAutoSaveIndicator = false
+        }
+    }
+
+    Column(
+        modifier = modifier
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState())
+    ) {
+        // Header with back button
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            TextButton(
+                onClick = onBack
+            ) {
+                Text("← Back")
+            }
+            Spacer(modifier = Modifier.width(16.dp))
+            Text(
+                text = "MQTT Configuration",
+                style = androidx.compose.material3.MaterialTheme.typography.headlineMedium,
+                modifier = Modifier.weight(1f)
+            )
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // MQTT Enable/Disable Switch
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Enable MQTT Publishing",
+                style = androidx.compose.material3.MaterialTheme.typography.bodyLarge
+            )
+            Switch(
+                checked = mqttEnabled,
+                onCheckedChange = { 
+                    mqttEnabled = it
+                    triggerAutoSave()
+                }
+            )
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        TextField(
+            value = mqttBroker,
+            onValueChange = { 
+                mqttBroker = it
+                triggerAutoSave()
+            },
+            label = { Text("MQTT Broker URI") },
+            placeholder = { Text("tcp://mqtt.example.com:1883") },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = mqttEnabled,
+            singleLine = true
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        TextField(
+            value = mqttUsername,
+            onValueChange = { 
+                mqttUsername = it
+                triggerAutoSave()
+            },
+            label = { Text("MQTT Username") },
+            placeholder = { Text("username") },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = mqttEnabled,
+            singleLine = true
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        TextField(
+            value = mqttPassword,
+            onValueChange = { 
+                mqttPassword = it
+                triggerAutoSave()
+            },
+            label = { Text("MQTT Password") },
+            placeholder = { Text("password") },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = mqttEnabled,
+            singleLine = true
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        TextField(
+            value = mqttTopic,
+            onValueChange = { 
+                mqttTopic = it
+                triggerAutoSave()
+            },
+            label = { Text("MQTT Topic") },
+            placeholder = { Text("r50/rowing_data") },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = mqttEnabled,
+            singleLine = true
+        )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // Auto-save indicator
+        if (showAutoSaveIndicator) {
+            Text(
+                text = "⚡ Settings saved automatically",
+                color = androidx.compose.material3.MaterialTheme.colorScheme.secondary,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+        }
+
+        // Information about MQTT
+        androidx.compose.material3.Card(
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp)
+            ) {
+                Text(
+                    text = "About MQTT",
+                    style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+                Text(
+                    text = "MQTT allows you to publish rowing data to an external broker for integration with other systems. When enabled, rowing data will be published in JSON format to the specified topic.",
+                    style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        // Version display at the bottom
+        Spacer(modifier = Modifier.height(32.dp))
+        
+        Box(
+            modifier = Modifier.fillMaxWidth(),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = MainActivity.APP_VERSION,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = FontWeight.Light,
+                modifier = Modifier.padding(bottom = 16.dp)
+            )
+        }
+    }
+}
+
+@Composable
+fun ConfigurationScreen(
+    modifier: Modifier = Modifier,
+    initialDeviceMac: String = "",
+    onConnect: (String) -> Unit,
+    onViewRecords: () -> Unit = {},
+    onMqttConfig: () -> Unit = {},
+    onDisconnect: () -> Unit = {},
+    onSettingsChanged: (String) -> Unit = { _ -> },
+    onScanDevices: () -> Unit = {},
+    discoveredDevices: List<BluetoothDeviceInfo> = emptyList(),
+    isScanning: Boolean = false
+) {
+    var deviceMac by remember { mutableStateOf(initialDeviceMac) }
     var isConnected by remember { mutableStateOf(false) }
     var showSavedMessage by remember { mutableStateOf(false) }
     var showDeviceDialog by remember { mutableStateOf(false) }
@@ -1126,7 +1322,7 @@ fun ConfigurationScreen(
 
     // Helper function to trigger auto-save with visual feedback
     fun triggerAutoSave() {
-        onSettingsChanged(deviceMac, mqttBroker, mqttUsername, mqttPassword, mqttEnabled, mqttTopic)
+        onSettingsChanged(deviceMac)
         showAutoSaveIndicator = true
     }
 
@@ -1193,94 +1389,6 @@ fun ConfigurationScreen(
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        Text(
-            text = "MQTT Configuration",
-            style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(bottom = 8.dp)
-        )
-
-        // MQTT Enable/Disable Switch
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "Enable MQTT Publishing",
-                style = androidx.compose.material3.MaterialTheme.typography.bodyLarge
-            )
-            Switch(
-                checked = mqttEnabled,
-                onCheckedChange = { 
-                    mqttEnabled = it
-                    triggerAutoSave()
-                },
-                enabled = !isConnected
-            )
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        TextField(
-            value = mqttBroker,
-            onValueChange = { 
-                mqttBroker = it
-                triggerAutoSave()
-            },
-            label = { Text("MQTT Broker URI") },
-            placeholder = { Text("tcp://mqtt.example.com:1883") },
-            modifier = Modifier.fillMaxWidth(),
-            enabled = !isConnected && mqttEnabled,
-            singleLine = true
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        TextField(
-            value = mqttUsername,
-            onValueChange = { 
-                mqttUsername = it
-                triggerAutoSave()
-            },
-            label = { Text("MQTT Username") },
-            placeholder = { Text("username") },
-            modifier = Modifier.fillMaxWidth(),
-            enabled = !isConnected && mqttEnabled,
-            singleLine = true
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        TextField(
-            value = mqttPassword,
-            onValueChange = { 
-                mqttPassword = it
-                triggerAutoSave()
-            },
-            label = { Text("MQTT Password") },
-            placeholder = { Text("password") },
-            modifier = Modifier.fillMaxWidth(),
-            enabled = !isConnected && mqttEnabled,
-            singleLine = true
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        TextField(
-            value = mqttTopic,
-            onValueChange = { 
-                mqttTopic = it
-                triggerAutoSave()
-            },
-            label = { Text("MQTT Topic") },
-            placeholder = { Text("r50/rowing_data") },
-            modifier = Modifier.fillMaxWidth(),
-            enabled = !isConnected && mqttEnabled,
-            singleLine = true
-        )
-
-        Spacer(modifier = Modifier.height(24.dp))
-
         // Auto-save indicator
         if (showAutoSaveIndicator) {
             Text(
@@ -1296,7 +1404,7 @@ fun ConfigurationScreen(
                 if (!isConnected) {
                     isConnected = true
                     showSavedMessage = true
-                    onConnect(deviceMac, mqttBroker, mqttUsername, mqttPassword, mqttEnabled, mqttTopic)
+                    onConnect(deviceMac)
                 }
             },
             modifier = Modifier.fillMaxWidth(),
@@ -1312,6 +1420,15 @@ fun ConfigurationScreen(
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("View Records")
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        OutlinedButton(
+            onClick = onMqttConfig,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("MQTT Configuration")
         }
 
         // Auto-hide the saved message after 3 seconds
@@ -1345,13 +1462,8 @@ fun ConfigurationScreen(
 
         if (isConnected) {
             Spacer(modifier = Modifier.height(16.dp))
-            val statusMessage = buildString {
-                append("✓ Connected to device")
-                if (mqttEnabled) append(" and MQTT broker")
-                if (!mqttEnabled) append(" only")
-            }
             Text(
-                text = statusMessage,
+                text = "✓ Connected to device",
                 color = androidx.compose.material3.MaterialTheme.colorScheme.primary,
                 modifier = Modifier.padding(8.dp)
             )
@@ -1543,9 +1655,20 @@ fun RowingDataScreenPreview() {
 fun ConfigurationScreenPreview() {
     R50ConnectorTheme {
         ConfigurationScreen(
-            onConnect = { _, _, _, _, _, _ -> },
+            onConnect = { _ -> },
             onDisconnect = { },
-            onSettingsChanged = { _, _, _, _, _, _ -> }
+            onSettingsChanged = { _ -> }
+        )
+    }
+}
+
+@Preview(showBackground = true)
+@Composable
+fun MqttConfigurationScreenPreview() {
+    R50ConnectorTheme {
+        MqttConfigurationScreen(
+            onBack = { },
+            onSettingsChanged = { _, _, _, _, _ -> }
         )
     }
 }
