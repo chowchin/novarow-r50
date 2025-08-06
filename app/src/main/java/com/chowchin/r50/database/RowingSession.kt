@@ -21,12 +21,12 @@ data class RowingSession(
     val stravaUploadStatus: StravaUploadStatus = StravaUploadStatus.NOT_UPLOADED,
     val stravaActivityId: Long? = null,
     val stravaUploadAttempts: Int = 0,
-    val lastStravaUploadAttempt: Date? = null
+    val lastStravaUploadAttempt: Date? = null,
 )
 
 enum class StravaUploadStatus {
     NOT_UPLOADED,
     UPLOADING,
     UPLOADED,
-    FAILED
+    FAILED,
 }

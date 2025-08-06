@@ -12,9 +12,9 @@ import java.util.Date
             entity = RowingSession::class,
             parentColumns = ["id"],
             childColumns = ["sessionId"],
-            onDelete = ForeignKey.CASCADE
-        )
-    ]
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
 )
 data class RowingDataPoint(
     @PrimaryKey(autoGenerate = true)
@@ -29,5 +29,5 @@ data class RowingDataPoint(
     val heartbeat: Int?,
     val power: Int?,
     val gear: Int?,
-    val rawHex: String
+    val rawHex: String,
 )

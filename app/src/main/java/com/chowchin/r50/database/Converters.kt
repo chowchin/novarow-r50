@@ -5,22 +5,14 @@ import java.util.Date
 
 class Converters {
     @TypeConverter
-    fun fromTimestamp(value: Long?): Date? {
-        return value?.let { Date(it) }
-    }
+    fun fromTimestamp(value: Long?): Date? = value?.let { Date(it) }
 
     @TypeConverter
-    fun dateToTimestamp(date: Date?): Long? {
-        return date?.time
-    }
-    
+    fun dateToTimestamp(date: Date?): Long? = date?.time
+
     @TypeConverter
-    fun fromStravaUploadStatus(status: StravaUploadStatus): String {
-        return status.name
-    }
-    
+    fun fromStravaUploadStatus(status: StravaUploadStatus): String = status.name
+
     @TypeConverter
-    fun toStravaUploadStatus(status: String): StravaUploadStatus {
-        return StravaUploadStatus.valueOf(status)
-    }
+    fun toStravaUploadStatus(status: String): StravaUploadStatus = StravaUploadStatus.valueOf(status)
 }
