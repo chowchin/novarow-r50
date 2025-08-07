@@ -93,7 +93,7 @@ data class BluetoothDeviceInfo(
 
 class MainActivity : ComponentActivity() {
     companion object {
-        const val APP_VERSION = "v1.3.1"
+        const val APP_VERSION = "v1.3.3"
     }
 
     private var deviceMac = ""
@@ -362,6 +362,11 @@ class MainActivity : ComponentActivity() {
                                 ) {
                                     sendTestFTMSData()
                                 },
+                                onReconnectBluetooth = @androidx.annotation.RequiresPermission(
+                                    android.Manifest.permission.BLUETOOTH_CONNECT
+                                ) {
+                                    connectToDevice(true)
+                                },
                                 onBack = @androidx.annotation.RequiresPermission(
                                     allOf = [android.Manifest.permission.BLUETOOTH_ADVERTISE, android.Manifest.permission.BLUETOOTH_CONNECT],
                                 ) {
@@ -398,7 +403,7 @@ class MainActivity : ComponentActivity() {
                                         ftmsConnectionStatus.value = "Disabled"
                                     }
 
-                                    connectToDevice()
+                                    connectToDevice(false)
                                     startDatabaseRecording()
                                     showDataScreen = true
                                 },
@@ -840,7 +845,7 @@ class MainActivity : ComponentActivity() {
     }
 
     @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
-    private fun connectToDevice() {
+    private fun connectToDevice(isReconnect: Boolean = false) {
         bluetoothConnectionStatus.value = "Connecting..."
         val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         val device = bluetoothManager.adapter.getRemoteDevice(deviceMac)
@@ -908,7 +913,11 @@ class MainActivity : ComponentActivity() {
 
                     if (charFFF2 != null) {
                         Log.i("BLE", "Found fff2 - Starting to write payloads")
-                        writeInitialPayloadsSequentially()
+                        if (isReconnect) {
+                            writeInitialPayloadsSequentially(1) // Skip the first payload as it is for resetting the data
+                        } else {
+                            writeInitialPayloadsSequentially()
+                        }
                     } else {
                         Log.w("BLE", "fff2 not found")
                     }
@@ -1167,6 +1176,7 @@ fun RowingDataScreen(
     ftmsStatus: String = "Stopped",
     ftmsConnectedDevices: List<BluetoothDevice> = emptyList(),
     onSendTestFTMS: () -> Unit = {},
+    onReconnectBluetooth: () -> Unit = {},
 ) {
     var showDisconnectDialog by remember { mutableStateOf(false) }
 
@@ -1388,6 +1398,18 @@ fun RowingDataScreen(
         }
 
         Spacer(modifier = Modifier.height(32.dp))
+
+        // Reconnect button (only show if Bluetooth is disconnected or has error)
+        if (bluetoothStatus == "Disconnected" || bluetoothStatus == "Connection Error") {
+            OutlinedButton(
+                onClick = onReconnectBluetooth,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Reconnect to R50 Rowing Machine")
+            }
+            
+            Spacer(modifier = Modifier.height(8.dp))
+        }
 
         // Test FTMS button (only show if FTMS is enabled)
         if (false && ftmsEnabled) {
@@ -2076,6 +2098,26 @@ fun RowingDataScreenPreview() {
             ftmsConnectedDevices = emptyList(),
             onBack = { },
             onSendTestFTMS = { },
+            onReconnectBluetooth = { },
+        )
+    }
+}
+
+@Preview(showBackground = true)
+@Composable
+fun RowingDataScreenDisconnectedPreview() {
+    R50ConnectorTheme {
+        RowingDataScreen(
+            rowingData = null,
+            mqttEnabled = true,
+            mqttStatus = "Connected",
+            bluetoothStatus = "Disconnected",
+            ftmsEnabled = true,
+            ftmsStatus = "Stopped",
+            ftmsConnectedDevices = emptyList(),
+            onBack = { },
+            onSendTestFTMS = { },
+            onReconnectBluetooth = { },
         )
     }
 }

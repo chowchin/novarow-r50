@@ -211,7 +211,7 @@ object FTMSUtils {
         FTMSConstants.FEATURE_AVERAGE_SPEED_SUPPORTED or
             FTMSConstants.FEATURE_CADENCE_SUPPORTED or
             FTMSConstants.FEATURE_RESISTANCE_LEVEL_SUPPORTED or
-            FTMSConstants.FEATURE_HEART_RATE_MEASUREMENT_SUPPORTED or
+            //FTMSConstants.FEATURE_HEART_RATE_MEASUREMENT_SUPPORTED or
             FTMSConstants.FEATURE_POWER_MEASUREMENT_SUPPORTED
 
     /**
@@ -219,6 +219,6 @@ object FTMSUtils {
      */
     fun getIndoorBikeDataFlags(): Int =
         FTMSConstants.IBD_FLAG_INSTANTANEOUS_CADENCE_PRESENT or
-            FTMSConstants.IBD_FLAG_INSTANTANEOUS_POWER_PRESENT or
-            FTMSConstants.IBD_FLAG_HEART_RATE_PRESENT
+            FTMSConstants.IBD_FLAG_INSTANTANEOUS_POWER_PRESENT
+            // or FTMSConstants.IBD_FLAG_HEART_RATE_PRESENT
 }
